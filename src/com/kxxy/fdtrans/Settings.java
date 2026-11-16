@@ -13,6 +13,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CompoundButton;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
@@ -30,6 +31,7 @@ public class Settings extends Activity {
 
     private SharedPreferences sp;
     private ProgressBar bar;
+    private TextView scopeList;
     private TextView progText;
     private android.content.BroadcastReceiver progRecv;
     private volatile boolean prewarmAck;
@@ -73,7 +75,7 @@ public class Settings extends Activity {
         root.addView(sw, lp(18));
 
         final Switch swName = new Switch(this);
-        swName.setText("保留应用英文原名");
+        swName.setText("应用名保留英文（括号显示中文）");
         swName.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
         swName.setTextColor(0xFFFFFFFF);
         swName.setChecked(sp.getBoolean("skipNames", true));
@@ -97,7 +99,70 @@ public class Settings extends Activity {
         root.addView(box("说明",
                 "• 中文/数字/包名/版本号/URL 不会被翻译\n"
                         + "• 已有译文直接命中缓存，只有新出现的英文才走网络\n"
-                        + "• 若某次界面更新后仍是英文，重新进入该页面即可"), lp(14));
+                        + "• 若某次界面更新后仍是英文，重新进入该页面即可\n"
+                        + "• 预翻译要等 F-Droid 打开过一次之后才联网（系统限制冷启动的后台进程）"), lp(14));
+
+        // ---- 翻译哪些应用（LSPosed 作用域）----
+        root.addView(box("翻译哪个应用",
+                "本模块对所有已勾选为作用域的应用生效（View 与 Compose 两种界面都支持）。\n"
+                + "• 加进来 / 移出去都走 root 改 LSPosed 配置，改完 lspd 会自动重启（约 20 秒）\n"
+                + "• 首次操作会弹一次 root 授权，允许即可\n"
+                + "• 已加进来的应用要重开一次才会生效"), lp(22));
+
+        final EditText pkgIn = new EditText(this);
+        pkgIn.setHint("包名，例如 me.timschneeberger.shizustore");
+        pkgIn.setTextSize(13);
+        pkgIn.setTextColor(0xFFEEEEEE);
+        pkgIn.setHintTextColor(0xFF888888);
+        root.addView(pkgIn, lp(0));
+
+        scopeList = text("作用域：读取中…", 13, 0xFFB0B0B0);
+        root.addView(scopeList, lp(10));
+
+        LinearLayout rowScope = new LinearLayout(this);
+        rowScope.setOrientation(LinearLayout.HORIZONTAL);
+        Button addB = new Button(this);
+        addB.setText("加入");
+        addB.setAllCaps(false);
+        addB.setTextColor(0xFFFFFFFF);
+        addB.setBackground(round(0xFF00695C));
+        addB.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                final String p = pkgIn.getText().toString().trim();
+                if (p.length() < 3) { toast("请输入包名"); return; }
+                scopeEdit(true, p);
+            }
+        });
+        rowScope.addView(addB, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        Button delB = new Button(this);
+        delB.setText("移出");
+        delB.setAllCaps(false);
+        delB.setTextColor(0xFFE0E0E0);
+        delB.setBackground(round(0xFF402020));
+        delB.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                final String p = pkgIn.getText().toString().trim();
+                if (p.length() < 3) { toast("请输入包名"); return; }
+                scopeEdit(false, p);
+            }
+        });
+        rowScope.addView(delB, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        root.addView(rowScope, lp(8));
+
+        Button refreshScope = new Button(this);
+        refreshScope.setText("刷新作用域列表");
+        refreshScope.setAllCaps(false);
+        refreshScope.setTextColor(0xFFE0E0E0);
+        refreshScope.setBackground(round(0xFF2A2A2A));
+        refreshScope.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) { refreshScopeAsync(); }
+        });
+        root.addView(refreshScope, lp(8));
 
         // ---- 进度面板 ----
         LinearLayout panel = new LinearLayout(this);
@@ -194,6 +259,7 @@ public class Settings extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        refreshScopeAsync();
         progRecv = new android.content.BroadcastReceiver() {
             @Override
             public void onReceive(android.content.Context c, Intent i) {
@@ -294,6 +360,79 @@ public class Settings extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         p.topMargin = (int) (topDp * getResources().getDisplayMetrics().density);
         return p;
+    }
+
+    // ---- LSPosed 作用域管理（走 root，直接改 modules_config.db）----
+    private static final String CFG_DB = "/data/adb/lspd/config/modules_config.db";
+    private static final String MOD_PKG = "com.kxxy.fdtrans";
+
+    private String su(String cmd) {
+        Process p = null;
+        try {
+            p = new ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start();
+            java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(p.getInputStream()));
+            StringBuilder sb = new StringBuilder();
+            String l;
+            while ((l = r.readLine()) != null) sb.append(l).append('\n');
+            p.waitFor();
+            return sb.toString();
+        } catch (Throwable t) {
+            return "ERR " + t;
+        } finally {
+            if (p != null) try { p.destroy(); } catch (Throwable ignore) { }
+        }
+    }
+
+    private void refreshScopeAsync() {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String out = su("sqlite3 " + CFG_DB
+                        + " \"select app_pkg_name from scope where module_pkg_name='" + MOD_PKG
+                        + "' order by app_pkg_name;\" 2>&1");
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (scopeList == null) return;
+                        if (out.startsWith("ERR")) {
+                            scopeList.setText("作用域：读不到（" + out + "）\n可能还没给过 root 权限");
+                            return;
+                        }
+                        String[] lines = out.trim().split("\n");
+                        int n = out.trim().isEmpty() ? 0 : lines.length;
+                        scopeList.setText("作用域（" + n + " 个）：" + (n == 0 ? "无" : "")
+                                + (n == 0 ? "" : "\n" + out.trim()));
+                    }
+                });
+            }
+        }, "fdtrans-scope").start();
+    }
+
+    private void scopeEdit(final boolean add, final String pkg) {
+        toast(add ? "正在加入…（首次会弹 root 授权）" : "正在移出…");
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String sql = add
+                        ? "INSERT OR REPLACE INTO scope(module_pkg_name,app_pkg_name,user_id) VALUES('"
+                          + MOD_PKG + "','" + pkg + "',0);"
+                        : "DELETE FROM scope WHERE module_pkg_name='" + MOD_PKG
+                          + "' AND app_pkg_name='" + pkg + "';";
+                String out = su("sqlite3 " + CFG_DB + " \"" + sql + "\" 2>&1; echo done");
+                // 重启 lspd（守守护脚本会在 15-22 秒内把它拉回来）
+                su("rm -f /data/adb/lspd/monitor; kill -9 $(pidof lspd) 2>/dev/null; echo killed");
+                if (!add) su("am force-stop " + pkg);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        toast(add ? "已加入，约 20 秒后生效，请重开该应用"
+                                  : "已移出，重开该应用后恢复原文");
+                        refreshScopeAsync();
+                    }
+                });
+            }
+        }, "fdtrans-scope-edit").start();
     }
 
     private void toast(String s) {
