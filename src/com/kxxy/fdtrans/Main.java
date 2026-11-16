@@ -24,7 +24,13 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public class Main implements IXposedHookLoadPackage {
 
     private static final String TAG = "FDTrans";
-    private static final String TARGET = "org.fdroid.fdroid";
+    private static final String SELF = "com.kxxy.fdtrans";
+    /** 不碰的包：系统/桌面/输入法这类改文本容易搞坏系统的，以及自家其它模块 */
+    private static final java.util.Set<String> SKIP = new java.util.HashSet<String>(
+            java.util.Arrays.asList(
+                    SELF, "android", "com.android.systemui", "com.android.settings",
+                    "com.android.phone", "com.android.bluetooth", "com.android.inputmethod.latin",
+                    "com.android.providers.media", "com.android.packageinstaller"));
     private static final String AST = "androidx.compose.ui.text.AnnotatedString";
 
     /** 安静期：最后一条译文到达后再等这么久才重建，避免连续刷新闪烁 */
@@ -41,6 +47,9 @@ public class Main implements IXposedHookLoadPackage {
             java.util.regex.Pattern.compile(".*[.:@/].*");
     private static final java.util.regex.Pattern VERSION =
             java.util.regex.Pattern.compile("^[vV]?\\d+(\\.\\d+)+.*");
+    /** 13 MB / 4.2 GiB 这类大小串，翻了反而看不懂 */
+    private static final java.util.regex.Pattern SIZE =
+            java.util.regex.Pattern.compile("^[\\d.,]+\\s*[kKMGT]?i?[bB]\\b.*");
 
     /** 懒创建：模块类在 zygote fork 早期就被加载，那时 main Looper 还不存在。 */
     private static volatile Handler uiHandler;
@@ -81,8 +90,11 @@ public class Main implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lp) {
-        if (!TARGET.equals(lp.packageName)) return;
-        Log("module loaded in " + lp.packageName);
+        String pkg = lp.packageName;
+        if (pkg == null) return;
+        if (SKIP.contains(pkg)) return;
+        if (pkg.startsWith("com.kxxy.")) return;   // 自家模块不互相 hook
+        Log("module loaded in " + pkg);
         startAt = System.currentTimeMillis();
 
         // Application 创建后才知道 filesDir
@@ -129,6 +141,46 @@ public class Main implements IXposedHookLoadPackage {
             }
         });
 
+        // 通用路径：View 体系的 app（RecyclerView / 普通 TextView）全部走这里。
+        // 只替换纯 String 文本，带 span 的一律放过，避免区间越界崩溃。
+        try {
+            Class<?> tvCls = XposedHelpers.findClass("android.widget.TextView", lp.classLoader);
+            XC_MethodHook tvHook = new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!Config.enabled()) return;
+                    try {
+                        Object o = param.args[0];
+                        if (!(o instanceof String)) return;
+                        String src = (String) o;
+                        if (src.length() < 2 || src.length() > 2000) return;
+                        String tr = DICT.get(src);
+                        if (tr == null) {
+                            if (!shouldTranslate(src)) return;
+                            tr = Translator.get(src);
+                            if (tr == null) {
+                                Translator.submit(src);
+                                return;
+                            }
+                        }
+                        if (tr.equals(src)) return;
+                        if (Config.skipNames() && isNameLike(src)
+                                && !tr.contains(src) && !src.contains(tr)) {
+                            tr = src + "（" + tr + "）";
+                        }
+                        param.args[0] = tr;
+                        Log("TVIEW: [" + clip(src) + "] -> [" + clip(tr) + "]");
+                    } catch (Throwable ignore) { }
+                }
+            };
+            XposedHelpers.findAndHookMethod(tvCls, "setText", CharSequence.class,
+                    "android.widget.TextView$BufferType", tvHook);
+            XposedHelpers.findAndHookMethod(tvCls, "setText", CharSequence.class, tvHook);
+            Log("TextView hook ok");
+        } catch (Throwable t) {
+            Log("TextView hook skip: " + t);
+        }
+
         try {
             Class<?> ast = XposedHelpers.findClass(AST, lp.classLoader);
             Log("AnnotatedString found: " + ast);
@@ -150,6 +202,11 @@ public class Main implements IXposedHookLoadPackage {
                             }
                         }
                         if (tr.equals(src)) return;
+                        // 应用名这类专名：默认显示成「原名（中文）」，既认得出又不全是英文
+                        if (Config.skipNames() && isNameLike(src)
+                                && !tr.contains(src) && !src.contains(tr)) {
+                            tr = src + "（" + tr + "）";
+                        }
                         // 关键：文本长度变了，span 的字符区间还是按原文算的，
                         // 不清掉会让 Compose 的 setSpan 抛 IndexOutOfBoundsException（此前闪退根因）。
                         dropSpans(param.thisObject);
@@ -267,6 +324,17 @@ public class Main implements IXposedHookLoadPackage {
     }
 
     /** 需要翻译的判据：含拉丁字母、不含已存在的中日韩字符、不是 URL/包名/版本号。 */
+    /** 单 token、短、无空格 → 多半是应用/项目专名（Buddy / Immich / Element）。 */
+    static boolean isNameLike(String s) {
+        int n = s.length();
+        if (n < 2 || n > 12) return false;
+        for (int i = 0; i < n; i++) {
+            char c = s.charAt(i);
+            if (c == ' ' || c == '\t' || c == '-') return false;
+        }
+        return true;
+    }
+
     static boolean shouldTranslate(String s) {
         int n = s.length();
         if (n < 2 || n > 2000) return false;
@@ -280,16 +348,7 @@ public class Main implements IXposedHookLoadPackage {
             if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) latin = true;
         }
         if (!latin) return false;
-        // 单个词、短、无空格：多半是应用/项目专名（Buddy / Immich / Skywire），
-        // 直译会变成"巴迪"这种怪结果，默认保留英文。
-        if (Config.skipNames() && n <= 12) {
-            boolean space = false;
-            for (int i = 0; i < n; i++) {
-                char c = s.charAt(i);
-                if (c == ' ' || c == '\t') { space = true; break; }
-            }
-            if (!space && !DICT.containsKey(s)) return false;
-        }
+        if (SIZE.matcher(s).matches()) return false;
         if (ASCII_ONLY.matcher(s).matches()) {
             if (HAS_SEP.matcher(s).matches()) return false;
             if (VERSION.matcher(s).matches()) return false;
