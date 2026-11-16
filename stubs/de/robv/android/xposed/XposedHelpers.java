@@ -10,4 +10,6 @@ public final class XposedHelpers {
   public static Object callStaticMethod(Class<?> c, String name, Object... args){return null;}
   public static Object getAdditionalInstanceField(Object obj, String key){return null;}
   public static Object setAdditionalInstanceField(Object obj, String key, Object v){return null;}
+  public static java.lang.reflect.Method findMethodExact(Class<?> c, String name, Object... params){return null;}
+  public static de.robv.android.xposed.XC_MethodHook.Unhook findAndHookMethod(Class<?> c, String name, Object... paramsAndHook){return null;}
 }
