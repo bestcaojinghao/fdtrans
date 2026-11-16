@@ -5,16 +5,22 @@ LSPosed 模块：把目标应用界面里的英文**直接替换成简体中文*
 
 ## 成品
 
-- 模块 APK：`fdtrans/mod/FDTrans-1.0.1.apk`
-- 包名：`com.kxxy.fdtrans`，versionName 1.0.1
+- 模块 APK：`fdtrans/mod/FDTrans-1.8.0.apk`
+- 包名：`com.kxxy.fdtrans`，versionName 1.8.0
 - 签名：v3，证书 DN `CN=FQ`
 
 ## 支持的界面类型
 
-| 界面 | hook 点 | 说明 |
+实测归纳出**四条文本通路**，模块四条全挂（同一进程只挂能挂上的那几条）：
+
+| 通路 | hook 点 | 适用 |
 |---|---|---|
-| Jetpack Compose | `androidx.compose.ui.text.AnnotatedString` 全部构造器 | 改写 `text` 字段并清 span |
+| Compose 富文本 | `androidx.compose.ui.text.AnnotatedString` 全部构造器 | 带 span/标注的文本；改 `text` 字段并清 span |
+| Compose 纯字符串 | `androidx.compose.foundation.text.modifiers.ParagraphLayoutCache` 构造器 | Compose 1.9 `BasicText(String)` **不造 AnnotatedString**，直接 `(String,TextStyle,...)` 进排版（Vanillify 实测只有这条中） |
+| Compose 段落 | `androidx.compose.ui.text.platform.AndroidParagraphIntrinsics` 构造器 | 老版本 Compose 走这条；改 `args[0]` 并清 `args[2]/args[3]` 的 span 列表 |
 | View（TextView 系） | `TextView.setText(CharSequence[, BufferType])` | 只替换纯 `String`，带 span 的放过 |
+
+Compose 类被 R8 混淆（名字变成 `l1.g` 之类）时按名字找不到，模块会**解析目标 APK 的 dex**（`Dex.java` 真解析 string_ids/type_ids/proto_ids/method_ids），按「构造器签名形状」反查 AnnotatedString 等价类并 hook 之（Komi Store / GitHub Store 实测 `struct hooked: class l1.g`）。
 
 ## 原理
 
@@ -26,6 +32,30 @@ Compose 的每段文本最终变成 `AnnotatedString`，View 的每段文本最�
 **改 text 必须同时清 span**：`AnnotatedString.spanStyles`/`paragraphStyles` 的区间按原文长度算，译文变短后越界，Compose 抛
 `IndexOutOfBoundsException: setSpan (0 ... 140) ends beyond length 54`（早期"一直在崩溃"的根因）。
 `Main.dropSpans()` 把 `spanStylesOrNull`/`paragraphStylesOrNull` 置 null、`annotations` 置空解决。
+
+## 检测：这个应用能不能翻
+
+每个目标应用启动后，模块会把探测结果写进它自己的私有目录 `files/fdtrans-probe.txt`：
+
+```
+pkg=com.vanillify.app
+named=1 struct=0 tv=true para=1 textcache=2
+probe=Compose 类 793（标准命名） · WebView 类 0
+```
+
+- `named/struct`：按名字找到的 Compose 类数 / 按 dex 形状找到的等价类数
+- `tv`：TextView 通路是否挂上
+- `textcache`：ParagraphLayoutCache 通路是否挂上
+- `probe`：dex 里 Compose/WebView 类数量、是否含 flutter/unity/react-native 原生库
+
+模块界面里每行应用会显示 `✓ 可翻` / `⚠ 可能翻不到`，详情页有「重新检测能否翻译」按钮；
+`debug` 开关打开后 logcat 里会有 `DIAG` / `skip#N (rule)` 级别的诊断。
+
+实测结论：
+- `com.vanillify.app`：只有 `ParagraphLayoutCache` 通路（Compose 1.9 纯字符串），补上后才翻得到
+- `make.more.r2d2.cellular_pro`：无 Compose，纯 TextView 通道，`TVIEW=55` 正常
+- `me.timschneeberger.shizustore` / `org.fdroid.fdroid`：标准命名 Compose，两条 Compose 通路都挂上
+- `zed.rainxch.githubstore`：Compose 被混淆，靠 dex 形状匹配（`struct=1`）
 
 ## 翻译链路
 
