@@ -116,6 +116,14 @@ bash build.sh FDTrans.apk
 - 描述文本量大（千万字符级），默认按需翻；全量预热要跑几小时
 - LSPosed 的配置服务 `lspd` 挂了模块就不会注入，表现为"装了没反应"
 
+## 声明
+
+本项目是 **[F-Droid](https://gitlab.com/fdroid/fdroidclient) 客户端（GPLv3）的第三方辅助模块**，
+只做一件事：把界面里仍是英文的应用名/摘要/描述就地翻成中文，作为中文显示的补充。
+不包含、不重新分发 F-Droid 的任何代码或二进制，与 F-Droid 项目及其维护者无隶属或背书关系。
+
+**非商业**：不收费、无广告、无捐赠、无内购、不收集任何用户数据。全文见 [NOTICE.md](NOTICE.md)。
+
 ## 许可
 
-MIT
+本仓库代码 MIT（见 [LICENSE](LICENSE)）；MIT 不改变 F-Droid 客户端自身的许可证。
