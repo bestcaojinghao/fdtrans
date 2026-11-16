@@ -11,6 +11,7 @@ public final class Config {
     public static final String ACTION = "com.kxxy.fdtrans.CFG";
     /** 目标应用 -> 设置页：统计/进度上报 */
     public static final String STAT = "com.kxxy.fdtrans.STAT";
+    public static final String PROBE = "com.kxxy.fdtrans.PROBE";
     public static final String SELF = "com.kxxy.fdtrans";
     public static final String REMOTE_PKG = "org.fdroid.fdroid";
     public static final String PREFS = "fdtrans-hook";
@@ -20,8 +21,18 @@ public final class Config {
     private static volatile long clearCacheAt;
     /** true = 保留应用/项目英文原名（不翻译单个词）；false = 全都翻 */
     private static volatile boolean skipNames = true;
+    /** 诊断日志：被规则挡下的文本 / 扫描到的 Compose 类名 */
+    private static volatile boolean debug;
 
     private Config() {}
+
+    public static boolean debug() {
+        return debug;
+    }
+
+    public static void setDebug(boolean v) {
+        debug = v;
+    }
 
     public static boolean enabled() {
         return enabled;
