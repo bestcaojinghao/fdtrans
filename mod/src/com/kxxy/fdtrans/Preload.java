@@ -238,7 +238,7 @@ public final class Preload {
             done += batch.size();
         }
         if (out.length() > 0) flush(pkg, out.toString(), uid);
-        try { prefs(ctx).edit().putInt("last_" + pkg, saved).apply(); } catch (Throwable ignore) { }
+        try { prefs(ctx).edit().putInt("last_" + pkg, saved).commit(); } catch (Throwable ignore) { }
         phase = "完成（新增 " + saved + " 条）";
         android.util.Log.i("FDTrans", "preload " + pkg + " attempted=" + done + " saved=" + saved);
     }
