@@ -140,7 +140,7 @@ public final class Prewarm {
 
         Log.i(TAG, "prewarm start mode=" + mode + " items=" + total + " batches=" + batches.size());
         final long t0 = System.currentTimeMillis();
-        final int workers = 5;
+        final int workers = 3;
         final java.util.concurrent.atomic.AtomicInteger idx = new java.util.concurrent.atomic.AtomicInteger();
         Thread[] ts = new Thread[workers];
         for (int w = 0; w < workers; w++) {
@@ -151,6 +151,19 @@ public final class Prewarm {
                         int i = idx.getAndIncrement();
                         if (i >= batches.size()) return;
                         List<String> b = batches.get(i);
+                        // 后台无网（冷启动的后台进程在部分 ROM 上不允许联网）时暂停等待，不烧掉条目
+                        int waits = 0;
+                        while (Translator.netDown() && waits < 90) {
+                            phase = "等待网络（打开一次 F-Droid 界面即可恢复）";
+                            cast(ctx, true);
+                            try { Thread.sleep(20000L); } catch (InterruptedException ignore) { return; }
+                            waits++;
+                        }
+                        if (Translator.netDown()) {
+                            Log.w(TAG, "prewarm abort: no network");
+                            return;
+                        }
+                        try { Thread.sleep(150L); } catch (InterruptedException ignore) { return; }
                         String[] out = null;
                         try {
                             out = Translator.translateBatch(b);
@@ -162,7 +175,9 @@ public final class Prewarm {
                             for (String src : b) {
                                 if (Translator.get(src) != null) { done++; continue; }
                                 String t = Translator.translateSync(src);
-                                if (t != null && t.length() > 0 && !t.equalsIgnoreCase(src)) {
+                                // 译文与原文相同（品牌名 Bing 不翻）也写进缓存，
+                                // 否则每次预翻译都会重问一遍，永远跑不完
+                                if (t != null && t.length() > 0) {
                                     Translator.put(src, t);
                                 }
                                 done++;
@@ -170,9 +185,7 @@ public final class Prewarm {
                         } else {
                             for (int k = 0; k < b.size(); k++) {
                                 String t = out[k].trim();
-                                if (t.length() > 0 && !t.equalsIgnoreCase(b.get(k))) {
-                                    Translator.put(b.get(k), t);
-                                }
+                                if (t.length() > 0) Translator.put(b.get(k), t);
                                 done++;
                             }
                         }
