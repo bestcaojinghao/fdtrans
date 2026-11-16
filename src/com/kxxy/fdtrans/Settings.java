@@ -7,6 +7,7 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -238,6 +239,27 @@ public class Settings extends Activity {
             }
         });
         card4.addView(restart, lp(12));
+        Button bridge = btn(Bridge.running ? "关闭后台代翻服务" : "开启后台代翻服务（没联网权限的应用）", 0xFF2E4A44);
+        bridge.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (Bridge.running) {
+                    stopService(new Intent(Settings.this, Bridge.class));
+                    toast("后台代翻已关闭");
+                } else {
+                    Intent i = new Intent(Settings.this, Bridge.class);
+                    if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+                    toast("后台代翻已开启：没有联网权限的应用也能翻");
+                }
+                ui.postDelayed(new Runnable() {
+                    @Override public void run() { reload(); }
+                }, 600L);
+            }
+        });
+        card4.addView(bridge, lp(10));
+        card4.addView(text("后台代翻 = 由本模块（有联网权限）替目标应用翻译。"
+                + "目标应用自己没有网络（缺 INTERNET 权限、或冷启动后台进程被系统限制）时用它。",
+                12, 0xFF7E7E7E), lp(8));
         Button clearAll = btn("清空全部应用的译文缓存", 0xFF303030);
         clearAll.setOnClickListener(new View.OnClickListener() {
             @Override

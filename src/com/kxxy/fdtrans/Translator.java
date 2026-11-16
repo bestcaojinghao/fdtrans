@@ -104,9 +104,23 @@ public final class Translator {
         } catch (Throwable ignore) { }
     }
 
+    private static File reqFile, resFile;
+    /** 本进程有没有网络权限（缺 INTERNET 的应用会抛 SecurityException） */
+    private static volatile boolean noInet;
+    /** 已经写进请求文件、还没拿到译文的文本（避免每次重组都重复追加） */
+    private static final java.util.Set<String> SPOOLED =
+            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+
+    public static boolean noInet() { return noInet; }
+
+    /** 本进程能否自己上网：没网权限或已知断网都不行，得走模块进程代翻。 */
+    public static boolean canNet() { return !noInet && !netDown; }
+
     public static void init(android.content.Context ctx, File dir) {
         appCtx = ctx == null ? null : ctx.getApplicationContext();
         cacheFile = new File(dir, "fdtrans-cache.tsv");
+        reqFile = new File(dir, "fdtrans-req.tsv");
+        resFile = new File(dir, "fdtrans-res.tsv");
         try {
             java.net.CookieHandler.setDefault(new java.net.CookieManager());
         } catch (Throwable ignore) { }
@@ -182,6 +196,11 @@ public final class Translator {
         if (src == null || CACHE.containsKey(src) || FAILED.contains(src)) return;
         if (!PENDING.add(src)) return;
         SEEN.incrementAndGet();
+        if (!canNet()) {
+            PENDING.remove(src);
+            if (SPOOLED.add(src)) spoolRequest(src);
+            return;
+        }
         pool().execute(new Runnable() {
             @Override
             public void run() {
@@ -208,6 +227,51 @@ public final class Translator {
                 }
             }
         });
+    }
+
+    /** 把一条待翻文本追加到本进程的请求文件，等模块 app 代翻。 */
+    private static synchronized void spoolRequest(String src) {
+        if (reqFile == null) return;
+        try {
+            java.io.FileWriter w = new java.io.FileWriter(reqFile, true);
+            try {
+                w.write(esc(src) + "\n");
+            } finally {
+                w.close();
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "spool err " + t);
+        }
+    }
+
+    /** 读模块 app 写回来的译文文件，灌进缓存。返回新写入条数。 */
+    public static synchronized int pumpRemote() {
+        if (resFile == null || !resFile.exists()) return 0;
+        int n = 0;
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(new java.io.FileInputStream(resFile), "UTF-8"));
+            try {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    int t = line.indexOf('\t');
+                    if (t <= 0) continue;
+                    String src = unesc(line.substring(0, t));
+                    String dst = unesc(line.substring(t + 1));
+                    if (src.length() == 0 || dst.length() == 0) continue;
+                    put(src, dst);
+                    SPOOLED.remove(src);
+                    n++;
+                }
+            } finally {
+                r.close();
+            }
+            if (n > 0) resFile.delete();
+        } catch (Throwable t) {
+            Log.w(TAG, "pump err " + t);
+        }
+        if (n > 0) Log.i(TAG, "remote translations in: " + n + " cache=" + CACHE.size());
+        return n;
     }
 
     private static ThreadPoolExecutor pool() {
@@ -310,6 +374,12 @@ public final class Translator {
     static void setNetDown(boolean v) { netDown = v; }
 
     private static void noteNet(Throwable t) {
+        if (t instanceof SecurityException
+                || (t.getMessage() != null && t.getMessage().toLowerCase().contains("internet permission"))) {
+            if (!noInet) Log.w(TAG, "no INTERNET permission in this process -> spool to module app");
+            noInet = true;
+            return;
+        }
         if (t instanceof java.net.UnknownHostException
                 || (t != null && t.getMessage() != null
                     && t.getMessage().contains("Unable to resolve host"))) {
@@ -446,8 +516,8 @@ public final class Translator {
     public static void put(String src, String dst) {
         lastActiveAt = System.currentTimeMillis();
         if (src == null || dst == null || dst.length() == 0) return;
-        CACHE.put(src, dst);
-        appendDisk(src, dst);
+        String old = CACHE.put(src, dst);
+        if (old == null || !old.equals(dst)) appendDisk(src, dst);   // 已有同样译文就不重复写盘
         DONE.incrementAndGet();
         report(false);
         Listener l = listener;
@@ -580,11 +650,11 @@ public final class Translator {
         }
     }
 
-    private static String esc(String s) {
+    static String esc(String s) {
         return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "");
     }
 
-    private static String unesc(String s) {
+    static String unesc(String s) {
         StringBuilder sb = new StringBuilder(s.length());
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);

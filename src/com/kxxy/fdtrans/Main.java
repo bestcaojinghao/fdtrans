@@ -77,6 +77,11 @@ public class Main implements IXposedHookLoadPackage {
     private static volatile long startAt;
     private static volatile Application app;
     private static volatile int lastSeen = -1;
+    /** 每个界面类的刷新预算：{次数, 上次时间}。防止"译文不断到达 → 无限重建"导致页面来回乱动。 */
+    private static final java.util.Map<String, long[]> REFRESH = new java.util.HashMap<String, long[]>();
+    private static final int MAX_REFRESH_PER_PAGE = 4;
+    private static final long PAGE_MIN_GAP_MS = 4000L;
+    private static final long PAGE_RESET_MS = 90000L;
     /** debounce 状态：首次待刷新时间 + 译文序号 */
     private static volatile long firstPendingAt;
     private static volatile int pendingSeq;
@@ -154,6 +159,7 @@ public class Main implements IXposedHookLoadPackage {
                                 loadPrefs(a);
                                 File dir = a.getFilesDir();
                                 Translator.init(a, dir);
+        startRemotePump();
                                 installComposeHooks(a, cl);
                                 Prewarm.resumeIfNeeded(a);
                                 registerCfgReceiver(a);
@@ -200,20 +206,8 @@ public class Main implements IXposedHookLoadPackage {
                         if (!(o instanceof String)) return;
                         String src = (String) o;
                         if (src.length() < 2 || src.length() > 2000) return;
-                        String tr = DICT.get(src);
-                        if (tr == null) {
-                            if (!shouldTranslate(src)) return;
-                            tr = Translator.get(src);
-                            if (tr == null) {
-                                Translator.submit(src);
-                                return;
-                            }
-                        }
-                        if (tr.equals(src)) return;
-                        if (Config.skipNames() && isNameLike(src)
-                                && !tr.contains(src) && !src.contains(tr)) {
-                            tr = src + "（" + tr + "）";
-                        }
+                        String tr = translate(src, "ast");
+                    if (tr == null) return;
                         param.args[0] = tr;
                         Log("TVIEW: [" + clip(src) + "] -> [" + clip(tr) + "]");
                     } catch (Throwable ignore) { }
@@ -280,6 +274,28 @@ public class Main implements IXposedHookLoadPackage {
             synchronized (Main.class) { firstPendingAt = 0L; }
             return;
         }
+        // 同一界面类的重建次数/间隔限制：超过预算就只用缓存，不再重建（下次进页面直接是中文）
+        String key = a.getClass().getName();
+        long now = System.currentTimeMillis();
+        long[] st = REFRESH.get(key);
+        if (st == null) {
+            st = new long[]{0L, 0L};
+            REFRESH.put(key, st);
+        }
+        if (now - st[1] > PAGE_RESET_MS) st[0] = 0L;
+        if (st[0] >= MAX_REFRESH_PER_PAGE) {
+            Log("skip refresh: budget used up for " + key + " (" + st[0] + ")");
+            synchronized (Main.class) { firstPendingAt = 0L; }
+            lastSeen = n;
+            return;
+        }
+        if (now - st[1] < PAGE_MIN_GAP_MS) {
+            Log("skip refresh: too soon for " + key);
+            synchronized (Main.class) { firstPendingAt = 0L; }
+            return;
+        }
+        st[0]++;
+        st[1] = now;
         lastSeen = n;
         lastRefresh = System.currentTimeMillis();
         synchronized (Main.class) { firstPendingAt = 0L; }
@@ -649,6 +665,21 @@ public class Main implements IXposedHookLoadPackage {
 
     private static volatile int textCacheHooks;
 
+    /** 目标进程自己没网时，定期收回模块 app 代翻的结果。 */
+    private static void startRemotePump() {
+        final Handler h = ui();
+        if (h == null) return;
+        h.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (Translator.pumpRemote() > 0) maybeRefresh();
+                } catch (Throwable ignore) { }
+                h.postDelayed(this, 2000L);
+            }
+        }, 2000L);
+    }
+
     /** 通用的「构造函数第 0 个参数是 String 就翻译」hook。 */
     private static XC_MethodHook stringArgCtorHook(final String tag) {
         return new XC_MethodHook() {
@@ -686,6 +717,7 @@ public class Main implements IXposedHookLoadPackage {
             }
         }
         if (tr.equals(src)) return null;
+        if (fromDict && Translator.get(src) == null) Translator.put(src, tr);  // 只记一次，避免反复 +DONE 引发刷新循环
         if (!fromDict && Config.skipNames() && isNameLike(src)
                 && !tr.contains(src) && !src.contains(tr)) {
             tr = src + "（" + tr + "）";
@@ -740,23 +772,8 @@ public class Main implements IXposedHookLoadPackage {
                     if (!(a[0] instanceof String)) return;
                     String src = (String) a[0];
                     if (src.length() < 2 || src.length() > 2000) return;
-                    String tr = DICT.get(src);
-                    if (tr == null) {
-                        if (!shouldTranslate(src)) {
-                            skip("rule", src);
-                            return;
-                        }
-                        tr = Translator.get(src);
-                        if (tr == null) {
-                            Translator.submit(src);
-                            return;
-                        }
-                    }
-                    if (tr.equals(src)) return;
-                    if (Config.skipNames() && isNameLike(src)
-                            && !tr.contains(src) && !src.contains(tr)) {
-                        tr = src + "（" + tr + "）";
-                    }
+                    String tr = translate(src, "hook");
+                    if (tr == null) return;
                     a[0] = tr;
                     // span 区间按原文长度算，译文长度不同会越界 → 直接清空
                     for (int i = 2; i < a.length && i < 4; i++) {
@@ -812,23 +829,8 @@ public class Main implements IXposedHookLoadPackage {
                 try {
                     String src = firstString(param.args);
                     if (src == null || src.length() == 0) return;
-                    String tr = DICT.get(src);
-                    if (tr == null) {
-                        if (!shouldTranslate(src)) {
-                            skip("rule", src);
-                            return;
-                        }
-                        tr = Translator.get(src);
-                        if (tr == null) {
-                            Translator.submit(src);
-                            return;
-                        }
-                    }
-                    if (tr.equals(src)) return;
-                    if (Config.skipNames() && isNameLike(src)
-                            && !tr.contains(src) && !src.contains(tr)) {
-                        tr = src + "（" + tr + "）";
-                    }
+                    String tr = translate(src, "struct");
+                    if (tr == null) return;
                     java.lang.reflect.Field tf = textFieldOf(param.thisObject.getClass());
                     if (tf == null) return;
                     clearLists(param.thisObject);
@@ -848,23 +850,8 @@ public class Main implements IXposedHookLoadPackage {
                     String src = firstString(param.args);
                     if (src == null || src.length() == 0) return;
 
-                    String tr = DICT.get(src);
-                    if (tr == null) {
-                        if (!shouldTranslate(src)) {
-                            skip("rule", src);
-                            return;
-                        }
-                        tr = Translator.get(src);
-                        if (tr == null) {
-                            Translator.submit(src);
-                            return;
-                        }
-                    }
-                    if (tr.equals(src)) return;
-                    if (Config.skipNames() && isNameLike(src)
-                            && !tr.contains(src) && !src.contains(tr)) {
-                        tr = src + "（" + tr + "）";
-                    }
+                    String tr = translate(src, "hook");
+                    if (tr == null) return;
                     dropSpans(param.thisObject);
                     XposedHelpers.setObjectField(param.thisObject, "text", tr);
                     Log("REPLACED: [" + clip(src) + "] -> [" + clip(tr) + "]");

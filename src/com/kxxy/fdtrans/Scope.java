@@ -53,6 +53,28 @@ public final class Scope {
         }
     }
 
+    /** root 但进入全局 mount 命名空间（跨 app 读文件必须，-mm 是 Magisk su 的开关）。 */
+    public static String suMM(String cmd) {
+        Process p = null;
+        try {
+            p = new ProcessBuilder("su", "-mm", "-c", cmd).redirectErrorStream(true).start();
+            StringBuilder sb = new StringBuilder();
+            BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
+            String line;
+            while ((line = r.readLine()) != null) sb.append(line).append('\n');
+            if (!p.waitFor(9, java.util.concurrent.TimeUnit.SECONDS)) {
+                p.destroy();
+                Log.w(TAG, "suMM timeout: " + cmd);
+                return "ERR timeout";
+            }
+            return sb.toString().trim();
+        } catch (Throwable t) {
+            return "ERR " + t;
+        } finally {
+            if (p != null) try { p.destroy(); } catch (Throwable ignored) {}
+        }
+    }
+
     /** 把 lspd 配置库（含 -wal/-shm，否则 wal 模式只拷主文件会读到旧数据）拷到可读位置。 */
     public static boolean pull(Context ctx) {
         String T = tmp(ctx);
