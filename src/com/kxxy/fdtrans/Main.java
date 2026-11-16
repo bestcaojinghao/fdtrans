@@ -108,7 +108,7 @@ public class Main implements IXposedHookLoadPackage {
                                 app = a;
                                 loadPrefs(a);
                                 File dir = a.getFilesDir();
-                                Translator.init(dir);
+                                Translator.init(a, dir);
                                 Prewarm.resumeIfNeeded(a);
                                 registerCfgReceiver(a);
                                 Log("cache dir = " + dir + " enabled=" + Config.enabled());
@@ -406,6 +406,9 @@ public class Main implements IXposedHookLoadPackage {
                             boolean v = i.getBooleanExtra("skipNames", true);
                             Config.setSkipNames(v);
                             e.putBoolean("skipNames", v);
+                        }
+                        if (i.getBooleanExtra("queryStat", false)) {
+                            Translator.report(true);
                         }
                         if (i.hasExtra("queryStatus")) {
                             Prewarm.sendStatus(a);

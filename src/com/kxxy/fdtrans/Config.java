@@ -9,6 +9,9 @@ package com.kxxy.fdtrans;
 public final class Config {
 
     public static final String ACTION = "com.kxxy.fdtrans.CFG";
+    /** 目标应用 -> 设置页：统计/进度上报 */
+    public static final String STAT = "com.kxxy.fdtrans.STAT";
+    public static final String SELF = "com.kxxy.fdtrans";
     public static final String REMOTE_PKG = "org.fdroid.fdroid";
     public static final String PREFS = "fdtrans-hook";
 

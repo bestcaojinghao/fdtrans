@@ -61,6 +61,11 @@ public final class Translator {
     private static final Set<String> FAILED = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
 
     private static final AtomicInteger DONE = new AtomicInteger();
+    private static android.content.Context appCtx;
+    private static volatile long lastStatAt;
+    private static volatile long lastActiveAt;
+    /** 本次进程内遇到过的不同原文条数（做进度分母用） */
+    private static final AtomicInteger SEEN = new AtomicInteger();
 
     /** 翻译成功回调（在翻译线程里调用）。 */
     public interface Listener {
@@ -80,7 +85,27 @@ public final class Translator {
 
     private Translator() {}
 
-    public static void init(File dir) {
+    /** 统计上报（节流 900ms）：缓存条数 / 本次新增 / 最近 5 秒内是否在翻 */
+    public static void report(boolean force) {
+        android.content.Context c = appCtx;
+        if (c == null) return;
+        long now = System.currentTimeMillis();
+        if (!force && now - lastStatAt < 900L) return;
+        lastStatAt = now;
+        try {
+            android.content.Intent i = new android.content.Intent(Config.STAT);
+            i.setPackage(Config.SELF);
+            i.putExtra("pkg", c.getPackageName());
+            i.putExtra("cache", CACHE.size());
+            i.putExtra("new", DONE.get());
+            i.putExtra("active", now - lastActiveAt < 5000L);
+            i.putExtra("seen", SEEN.get());
+            c.sendBroadcast(i);
+        } catch (Throwable ignore) { }
+    }
+
+    public static void init(android.content.Context ctx, File dir) {
+        appCtx = ctx == null ? null : ctx.getApplicationContext();
         cacheFile = new File(dir, "fdtrans-cache.tsv");
         try {
             java.net.CookieHandler.setDefault(new java.net.CookieManager());
@@ -156,6 +181,7 @@ public final class Translator {
     public static void submit(final String src) {
         if (src == null || CACHE.containsKey(src) || FAILED.contains(src)) return;
         if (!PENDING.add(src)) return;
+        SEEN.incrementAndGet();
         pool().execute(new Runnable() {
             @Override
             public void run() {
@@ -165,6 +191,8 @@ public final class Translator {
                         CACHE.put(src, out);
                         appendDisk(src, out);
                         DONE.incrementAndGet();
+                        lastActiveAt = System.currentTimeMillis();
+                        report(false);
                         Listener l = listener;
                         if (l != null) {
                             try { l.onTranslated(src, out); } catch (Throwable ignore) { }
@@ -416,10 +444,12 @@ public final class Translator {
 
     /** 外部写入译文（预热用）。 */
     public static void put(String src, String dst) {
+        lastActiveAt = System.currentTimeMillis();
         if (src == null || dst == null || dst.length() == 0) return;
         CACHE.put(src, dst);
         appendDisk(src, dst);
         DONE.incrementAndGet();
+        report(false);
         Listener l = listener;
         if (l != null) {
             try { l.onTranslated(src, dst); } catch (Throwable ignore) { }

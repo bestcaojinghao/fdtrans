@@ -1,257 +1,268 @@
 package com.kxxy.fdtrans;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
-import android.graphics.Color;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.AdapterView;
+import android.widget.BaseAdapter;
 import android.widget.Button;
-import android.widget.CompoundButton;
-import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ListView;
 import android.widget.ProgressBar;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
 /**
- * 模块设置页：一个总开关 + 缓存清理 + 打开 F-Droid。
+ * 主界面：通用实时翻译。
  * 纯代码构建 UI（模块 APK 不带资源表，避免 aapt2 资源依赖）。
  */
 public class Settings extends Activity {
 
-    private static final int PAD = 44;
+    static class Row {
+        String pkg;
+        String label;
+        Drawable icon;
+        int cache;
+        boolean known;
+    }
 
     private SharedPreferences sp;
-    private ProgressBar bar;
-    private TextView scopeList;
-    private TextView progText;
-    private android.content.BroadcastReceiver progRecv;
-    private volatile boolean prewarmAck;
+    private final Set<String> scoped = new LinkedHashSet<String>();
+    private final List<Row> rows = new ArrayList<Row>();
+    private ListView list;
+    private TextView countText;
+    private TextView noteText;
+    private Adapter adapter;
+    private Switch swOn;
+    private Switch swNames;
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private android.widget.ProgressBar liveBar;
+    private android.content.BroadcastReceiver statRecv;
+    /** pkg -> {缓存条数, 本次新增, 是否正在翻} */
+    private final java.util.Map<String, int[]> stat = new java.util.HashMap<String, int[]>();
 
     @Override
-    protected void onCreate(Bundle state) {
-        super.onCreate(state);
-        sp = getSharedPreferences("fdtrans", MODE_PRIVATE);
+    protected void onCreate(Bundle b) {
+        super.onCreate(b);
+        sp = getSharedPreferences("fdtrans", Context.MODE_PRIVATE);
 
         ScrollView sc = new ScrollView(this);
-        sc.setBackgroundColor(0xFF121212);
+        sc.setBackgroundColor(0xFF0E0E0E);
+        sc.setFillViewport(true);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(PAD, PAD, PAD, PAD);
-        sc.addView(root, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT));
+        int pad = dp(18);
+        root.setPadding(pad, dp(28), pad, dp(28));
+        sc.addView(root);
 
-        TextView title = text("F-Droid 实时翻译", 24, 0xFFFFFFFF);
+        // ---- 标题 ----
+        TextView title = text("实时翻译", 25, 0xFFFFFFFF);
         title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
-        root.addView(title, lp(0));
+        root.addView(title);
+        root.addView(text("界面上的英文 → 中文，随界面自动替换（LSPosed 模块）", 13, 0xFF9E9E9E), lp(6));
 
-        root.addView(text("开启后 F-Droid 界面里的英文（应用名、摘要、描述）会被自动翻成中文，"
-                + "直接显示在原位，不加悬浮窗、不改变布局。", 14, 0xFFB0B0B0), lp(20));
-
-        final Switch sw = new Switch(this);
-        sw.setText("启用实时翻译");
-        sw.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-        sw.setTextColor(0xFFFFFFFF);
-        sw.setChecked(sp.getBoolean("enabled", true));
-        sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+        // ---- 开关 ----
+        LinearLayout card1 = card();
+        swOn = new Switch(this);
+        swOn.setText("启用实时翻译");
+        swOn.setTextSize(16);
+        swOn.setTextColor(0xFFEEEEEE);
+        swOn.setChecked(sp.getBoolean("enabled", true));
+        swOn.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
             @Override
-            public void onCheckedChanged(CompoundButton b, boolean v) {
-                android.util.Log.i("FDTrans", "toggle -> " + v);
-                boolean ok = sp.edit().putBoolean("enabled", v).commit();
-                android.util.Log.i("FDTrans", "prefs write " + ok);
-                // F-Droid 未运行时广播会丢，所以先把它的进程拉起来再发
-                pushToTarget("enabled", v);
-                toast(v ? "已开启实时翻译" : "已关闭实时翻译");
+            public void onCheckedChanged(android.widget.CompoundButton btn, boolean v) {
+                sp.edit().putBoolean("enabled", v).apply();
+                Push.bool(Settings.this, scoped, "enabled", v);
+                toast(v ? "已开启，正在运行的应用立刻生效" : "已关闭，正在运行的应用立刻恢复英文");
             }
         });
-        root.addView(sw, lp(18));
+        card1.addView(swOn, lp(0));
 
-        final Switch swName = new Switch(this);
-        swName.setText("应用名保留英文（括号显示中文）");
-        swName.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-        swName.setTextColor(0xFFFFFFFF);
-        swName.setChecked(sp.getBoolean("skipNames", true));
-        swName.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+        swNames = new Switch(this);
+        swNames.setText("应用名保留英文（括号里给中文）");
+        swNames.setTextSize(15);
+        swNames.setTextColor(0xFFEEEEEE);
+        swNames.setChecked(sp.getBoolean("skipNames", true));
+        swNames.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
             @Override
-            public void onCheckedChanged(CompoundButton b, boolean v) {
-                android.util.Log.i("FDTrans", "skipNames -> " + v);
-                sp.edit().putBoolean("skipNames", v).commit();
-                pushToTarget("skipNames", v);
-                toast(v ? "应用名保留英文（推荐）" : "应用名也会被翻译");
+            public void onCheckedChanged(android.widget.CompoundButton btn, boolean v) {
+                sp.edit().putBoolean("skipNames", v).apply();
+                Push.bool(Settings.this, scoped, "skipNames", v);
+                toast(v ? "应用名保留英文，例如 NodeVideo（节点视频）" : "应用名也会被直接翻译");
             }
         });
-        root.addView(swName, lp(8));
+        card1.addView(swNames, lp(14));
+        card1.addView(text("开关会推给所有已加入的应用；没在运行的下次打开时沿用上次保存的值。",
+                12, 0xFF7E7E7E), lp(12));
+        root.addView(card1, lp(20));
 
-        root.addView(box("状态",
-                "引擎  Bing（免费网页接口，无需 key；失败自动回退 MyMemory）\n"
-                        + "方向  英文 → 简体中文\n"
-                        + "缓存  F-Droid 私有目录 fdtrans-cache.tsv\n"
-                        + "刷新  译文安静 0.7s 后一次性重建（打字时不重建）"), lp(18));
-
-        root.addView(box("说明",
-                "• 中文/数字/包名/版本号/URL 不会被翻译\n"
-                        + "• 已有译文直接命中缓存，只有新出现的英文才走网络\n"
-                        + "• 若某次界面更新后仍是英文，重新进入该页面即可\n"
-                        + "• 预翻译要等 F-Droid 打开过一次之后才联网（系统限制冷启动的后台进程）"), lp(14));
-
-        // ---- 翻译哪些应用（LSPosed 作用域）----
-        root.addView(box("翻译哪个应用",
-                "本模块对所有已勾选为作用域的应用生效（View 与 Compose 两种界面都支持）。\n"
-                + "• 加进来 / 移出去都走 root 改 LSPosed 配置，改完 lspd 会自动重启（约 20 秒）\n"
-                + "• 首次操作会弹一次 root 授权，允许即可\n"
-                + "• 已加进来的应用要重开一次才会生效"), lp(22));
-
-        final EditText pkgIn = new EditText(this);
-        pkgIn.setHint("包名，例如 me.timschneeberger.shizustore");
-        pkgIn.setTextSize(13);
-        pkgIn.setTextColor(0xFFEEEEEE);
-        pkgIn.setHintTextColor(0xFF888888);
-        root.addView(pkgIn, lp(0));
-
-        scopeList = text("作用域：读取中…", 13, 0xFFB0B0B0);
-        root.addView(scopeList, lp(10));
-
-        LinearLayout rowScope = new LinearLayout(this);
-        rowScope.setOrientation(LinearLayout.HORIZONTAL);
-        Button addB = new Button(this);
-        addB.setText("加入");
-        addB.setAllCaps(false);
-        addB.setTextColor(0xFFFFFFFF);
-        addB.setBackground(round(0xFF00695C));
-        addB.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                final String p = pkgIn.getText().toString().trim();
-                if (p.length() < 3) { toast("请输入包名"); return; }
-                scopeEdit(true, p);
-            }
-        });
-        rowScope.addView(addB, new LinearLayout.LayoutParams(0,
+        // ---- 已加入的应用 ----
+        LinearLayout card2 = card();
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        TextView h = text("已加入翻译的应用", 15, 0xFF80CBC4);
+        h.setTypeface(h.getTypeface(), android.graphics.Typeface.BOLD);
+        head.addView(h, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Button delB = new Button(this);
-        delB.setText("移出");
-        delB.setAllCaps(false);
-        delB.setTextColor(0xFFE0E0E0);
-        delB.setBackground(round(0xFF402020));
-        delB.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                final String p = pkgIn.getText().toString().trim();
-                if (p.length() < 3) { toast("请输入包名"); return; }
-                scopeEdit(false, p);
-            }
-        });
-        rowScope.addView(delB, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        root.addView(rowScope, lp(8));
+        countText = text("", 13, 0xFF9E9E9E);
+        head.addView(countText);
+        card2.addView(head, lp(0));
 
-        Button refreshScope = new Button(this);
-        refreshScope.setText("刷新作用域列表");
-        refreshScope.setAllCaps(false);
-        refreshScope.setTextColor(0xFFE0E0E0);
-        refreshScope.setBackground(round(0xFF2A2A2A));
-        refreshScope.setOnClickListener(new View.OnClickListener() {
+        list = new ListView(this);
+        list.setDivider(null);
+        list.setBackgroundColor(0x00000000);
+        adapter = new Adapter();
+        list.setAdapter(adapter);
+        list.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             @Override
-            public void onClick(View v) { refreshScopeAsync(); }
-        });
-        root.addView(refreshScope, lp(8));
-
-        // ---- 进度面板 ----
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setBackground(round(0xFF1E1E1E));
-        panel.setPadding(32, 28, 32, 28);
-        progText = text("预翻译进度：尚未开始", 14, 0xFFD0D0D0);
-        panel.addView(progText, lp(0));
-        bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        bar.setMax(100);
-        bar.setProgress(0);
-        panel.addView(bar, lp(12));
-        root.addView(panel, lp(22));
-
-        Button pre = new Button(this);
-        pre.setText("预翻译整个仓库（名称+摘要）");
-        pre.setAllCaps(false);
-        pre.setTextColor(0xFFFFFFFF);
-        pre.setBackground(round(0xFF00695C));
-        pre.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                startSilent(1);
-                toast("已在后台开始预翻译（名称+摘要），你可以继续用手机，回来这里看进度");
-            }
-        });
-        root.addView(pre, lp(22));
-
-        Button pre2 = new Button(this);
-        pre2.setText("预翻译详细描述（慢，约 1-3 小时）");
-        pre2.setAllCaps(false);
-        pre2.setTextColor(0xFFE0E0E0);
-        pre2.setBackground(round(0xFF2A2A2A));
-        pre2.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                startSilent(2);
-                toast("已在后台开始预翻译详细描述，会跑一会儿，不影响你使用");
-            }
-        });
-        root.addView(pre2, lp(10));
-
-        Button clear = new Button(this);
-        clear.setText("清空翻译缓存");
-        clear.setAllCaps(false);
-        clear.setTextColor(0xFFFFFFFF);
-        clear.setBackground(round(0xFF303030));
-        clear.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                long t = System.currentTimeMillis();
-                sp.edit().putLong("clearCacheAt", t).apply();
-                pushToTarget("clearCacheAt", t);
-                toast("已通知 F-Droid 清空缓存");
-            }
-        });
-        root.addView(clear, lp(22));
-
-        Button open = new Button(this);
-        open.setText("打开 F-Droid");
-        open.setAllCaps(false);
-        open.setTextColor(0xFFFFFFFF);
-        open.setBackground(round(0xFF1565C0));
-        open.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                Intent i = getPackageManager().getLaunchIntentForPackage("org.fdroid.fdroid");
-                if (i == null) {
-                    toast("未安装 F-Droid");
-                    return;
-                }
-                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            public void onItemClick(AdapterView<?> p, View v, int pos, long id) {
+                if (pos < 0 || pos >= rows.size()) return;
+                Intent i = new Intent(Settings.this, AppDetail.class);
+                i.putExtra("pkg", rows.get(pos).pkg);
+                i.putExtra("label", rows.get(pos).label);
                 startActivity(i);
             }
         });
-        root.addView(open, lp(10));
+        card2.addView(list, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(200)));
 
-        Button kill = new Button(this);
-        kill.setText("强制重启 F-Droid（应用设置变更）");
-        kill.setAllCaps(false);
-        kill.setTextColor(0xFFE0E0E0);
-        kill.setBackground(round(0xFF2A2A2A));
-        kill.setOnClickListener(new View.OnClickListener() {
+        noteText = text("读取中…", 12, 0xFF9E9E9E);
+        card2.addView(noteText, lp(8));
+
+        liveBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        liveBar.setIndeterminate(true);
+        liveBar.setVisibility(View.GONE);
+        card2.addView(liveBar, lp(6));
+
+        LinearLayout rowBtns = new LinearLayout(this);
+        rowBtns.setOrientation(LinearLayout.HORIZONTAL);
+        Button add = btn("＋ 添加应用", 0xFF00695C);
+        add.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                toast("请在系统设置里强行停止 F-Droid，或重进应用 2 次");
+                startActivity(new Intent(Settings.this, AppPicker.class));
             }
         });
-        root.addView(kill, lp(10));
+        rowBtns.addView(add, weight(1f));
+        Button refresh = btn("刷新", 0xFF2A2A2A);
+        refresh.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) { reload(); }
+        });
+        rowBtns.addView(refresh, weight(1f));
+        card2.addView(rowBtns, lp(12));
+        root.addView(card2, lp(18));
+
+        // ---- 引擎 ----
+        LinearLayout card3 = card();
+        card3.addView(text("翻译引擎", 15, 0xFF80CBC4), lp(0));
+        final RadioGroup rg = new RadioGroup(this);
+        rg.setOrientation(RadioGroup.VERTICAL);
+        RadioButton rbBing = new RadioButton(this);
+        rbBing.setText("Bing（推荐，质量好、快）");
+        rbBing.setTextSize(14);
+        rbBing.setTextColor(0xFFDDDDDD);
+        rbBing.setId(1001);
+        rg.addView(rbBing);
+        RadioButton rbMm = new RadioButton(this);
+        rbMm.setText("MyMemory（备用，配额小）");
+        rbMm.setTextSize(14);
+        rbMm.setTextColor(0xFFDDDDDD);
+        rbMm.setId(1002);
+        rg.addView(rbMm);
+        final boolean bing = !"mymemory".equals(sp.getString("engine", "bing"));
+        rg.check(bing ? 1001 : 1002);
+        rg.setOnCheckedChangeListener(new RadioGroup.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(RadioGroup g, int id) {
+                String e = id == 1002 ? "mymemory" : "bing";
+                sp.edit().putString("engine", e).apply();
+                toast("已切换到 " + ("mymemory".equals(e) ? "MyMemory" : "Bing"));
+            }
+        });
+        card3.addView(rg, lp(6));
+        card3.addView(text("换引擎后要重开目标应用才生效（翻译在目标应用的进程里跑）。",
+                12, 0xFF7E7E7E), lp(8));
+        root.addView(card3, lp(18));
+
+        // ---- 维护 ----
+        LinearLayout card4 = card();
+        card4.addView(text("维护", 15, 0xFF80CBC4), lp(0));
+        Button restart = btn("重启 lspd（改完作用域后）", 0xFF2A2A2A);
+        restart.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toast("正在重启 lspd，约 20 秒后恢复");
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() { Scope.restartLspd(); }
+                }, "fdtrans-lspd").start();
+            }
+        });
+        card4.addView(restart, lp(12));
+        Button clearAll = btn("清空全部应用的译文缓存", 0xFF303030);
+        clearAll.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toast("正在清空…");
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        StringBuilder sb = new StringBuilder();
+                        for (String p : scoped) {
+                            sb.append("rm -f /data/user/0/").append(p)
+                              .append("/files/fdtrans-cache.tsv; ")
+                              .append("am force-stop ").append(p).append("; ");
+                        }
+                        Scope.su(sb.toString() + "echo DONE");
+                        ui.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                toast("已清空，重开应用即可重新翻译");
+                                reload();
+                            }
+                        });
+                    }
+                }, "fdtrans-clear").start();
+            }
+        });
+        card4.addView(clearAll, lp(10));
+        root.addView(card4, lp(18));
+
+        // ---- 说明 ----
+        LinearLayout card5 = card();
+        card5.addView(text("说明", 15, 0xFF80CBC4), lp(0));
+        card5.addView(text(
+                "• 译文按“应用”各自缓存，换应用不会重复请求\n"
+                + "• 中文、数字、版本号、URL、包名、文件大小不会被翻\n"
+                + "• 品牌名（PipePipe、Bitwarden 这类）机器翻译本身不翻，会原样保留\n"
+                + "• 界面上新出现的英文，首次显示仍是英文，不到一秒后自动变成中文\n"
+                + "• 加进来的应用要重开一次才会被 hook", 13, 0xFFBDBDBD), lp(8));
+        root.addView(card5, lp(18));
+
+        root.addView(text("v" + version() + "  ·  通用模式（作用域内任意应用）", 11, 0xFF616161), lp(18));
 
         setContentView(sc);
     }
@@ -259,305 +270,292 @@ public class Settings extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        refreshScopeAsync();
-        progRecv = new android.content.BroadcastReceiver() {
-            @Override
-            public void onReceive(android.content.Context c, Intent i) {
-                int done = i.getIntExtra("done", 0);
-                int total = i.getIntExtra("total", 0);
-                boolean running = i.getBooleanExtra("running", false);
-                String phase = i.getStringExtra("phase");
-                int cache = i.getIntExtra("cache", 0);
-                if (running) prewarmAck = true;
-                int pct = total > 0 ? (int) (done * 100L / total) : 0;
-                if (bar != null) {
-                    bar.setMax(100);
-                    bar.setProgress(running ? pct : (total > 0 ? 100 : 0));
-                    bar.setIndeterminate(running && total == 0);
-                }
-                if (progText != null) {
-                    if (total == 0 && !running) {
-                        progText.setText("预翻译进度：尚未开始（缓存 " + cache + " 条）");
-                    } else if (running) {
-                        progText.setText("预翻译中：" + done + " / " + total + "（" + pct + "%）"
-                                + "\n阶段 " + (phase == null ? "-" : phase) + "，缓存 " + cache + " 条");
-                    } else {
-                        progText.setText("预翻译完成：本次处理 " + (total > 0 ? total : done)
-                                + " 条（100%）\n缓存共 " + cache + " 条，界面已可直接复用");
-                    }
-                }
-            }
-        };
-        IntentFilter f = new IntentFilter(Prewarm.ACTION_PROGRESS);
-        if (android.os.Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(progRecv, f, android.content.Context.RECEIVER_EXPORTED);
-        } else {
-            registerReceiver(progRecv, f);
-        }
-        // 问一次 F-Droid 当前状态（它在跑才会回）
-        final boolean[] replied = {false};
-        final Runnable[] mark = new Runnable[1];
-        Intent q = new Intent(Config.ACTION);
-        q.setPackage(Config.REMOTE_PKG);
-        q.putExtra("queryStatus", true);
-        try {
-            sendBroadcast(q);
-        } catch (Throwable ignore) { }
-        final android.content.BroadcastReceiver[] holder = {progRecv};
-        final android.content.BroadcastReceiver orig = progRecv;
-        // 2.5s 内没收到回包 → 说明 F-Droid 没在跑
-        new android.os.Handler(getMainLooper()).postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (progText != null && progText.getText().toString().contains("尚未开始")) {
-                    progText.setText("预翻译进度：未知（F-Droid 没在运行，点下面的按钮会自动启动它）");
-                }
-            }
-        }, 2500);
+        if (swOn != null) swOn.setChecked(sp.getBoolean("enabled", true));
+        if (swNames != null) swNames.setChecked(sp.getBoolean("skipNames", true));
+        startStatReceiver();
+        reload();
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        if (progRecv != null) {
-            try {
-                unregisterReceiver(progRecv);
-            } catch (Throwable ignore) { }
-            progRecv = null;
+        stopStatReceiver();
+    }
+
+    private void startStatReceiver() {
+        if (statRecv != null) return;
+        statRecv = new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(Context c, Intent i) {
+                String pkg = i.getStringExtra("pkg");
+                if (pkg == null) return;
+                int cache = i.getIntExtra("cache", -1);
+                int added = i.getIntExtra("new", 0);
+                boolean active = i.getBooleanExtra("active", false);
+                int seen = i.getIntExtra("seen", 0);
+                stat.put(pkg, new int[]{cache < 0 ? 0 : cache, added, active ? 1 : 0, seen});
+                applyStat();
+            }
+        };
+        IntentFilter f = new IntentFilter(Config.STAT);
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(statRecv, f, Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(statRecv, f);
         }
     }
 
+    private void stopStatReceiver() {
+        if (statRecv == null) return;
+        try { unregisterReceiver(statRecv); } catch (Throwable ignore) {}
+        statRecv = null;
+    }
+
+    /** 把各目标应用上报的统计刷到列表和进度条上。 */
+    private void applyStat() {
+        boolean anyActive = false;
+        int totalCache = 0;
+        int busyAdded = 0, busySeen = 0;
+        String busyLabel = null;
+        for (Row r : rows) {
+            int[] st = stat.get(r.pkg);
+            if (st == null) continue;
+            r.cache = st[0];
+            r.known = true;
+            totalCache += st[0];
+            if (st[2] == 1) {
+                anyActive = true;
+                busyLabel = r.label;
+                busyAdded += st[1];
+                busySeen += st[3];
+            }
+        }
+        if (adapter != null) adapter.notifyDataSetChanged();
+        if (liveBar != null) {
+            if (anyActive) {
+                liveBar.setVisibility(View.VISIBLE);
+                if (busySeen > 0 && busyAdded <= busySeen) {
+                    liveBar.setIndeterminate(false);
+                    liveBar.setMax(busySeen);
+                    liveBar.setProgress(Math.min(busyAdded, busySeen));
+                } else {
+                    liveBar.setIndeterminate(true);
+                }
+            } else {
+                liveBar.setVisibility(View.GONE);
+            }
+        }
+        if (noteText != null) {
+            if (anyActive) {
+                String pct = busySeen > 0
+                        ? "（已完成 " + busyAdded + " / " + busySeen + " 条，"
+                          + (busyAdded * 100 / Math.max(1, busySeen)) + "%）"
+                        : "（本次已新增 " + busyAdded + " 条）";
+                noteText.setText("正在翻译：" + busyLabel + " " + pct
+                        + "  缓存合计 " + totalCache + " 条");
+            } else if (!rows.isEmpty()) {
+                noteText.setText("点一行进入该应用的详情（清缓存 / 重启 / 移出）。缓存合计 "
+                        + totalCache + " 条");
+            }
+        }
+    }
+
+    /** 问每个目标应用要一次统计（广播进不去说明那个应用没在跑）。 */
+    private void queryStats() {
+        for (String p : scoped) {
+            try {
+                Intent q = new Intent(Config.ACTION);
+                q.setPackage(p);
+                q.putExtra("queryStat", true);
+                sendBroadcast(q);
+            } catch (Throwable ignore) {}
+        }
+    }
+
+    /** 读作用域 + 每个应用的译文条数。 */
+    private void reload() {
+        if (noteText != null) noteText.setText("读取作用域中…");
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final Set<String> s = Scope.read(Settings.this);
+                final List<Row> out = new ArrayList<Row>();
+                if (s != null) {
+                    StringBuilder cmd = new StringBuilder();
+                    for (String p : s) {
+                        cmd.append("n=$(wc -l < /data/user/0/").append(p)
+                           .append("/files/fdtrans-cache.tsv 2>/dev/null); echo \"")
+                           .append(p).append(" ${n:-0}\"; ");
+                    }
+                    String res = cmd.length() == 0 ? "" : Scope.su(cmd.toString());
+                    java.util.Map<String, Integer> cnt = new java.util.HashMap<String, Integer>();
+                    for (String line : res.split("\n")) {
+                        String[] kv = line.trim().split("\\s+");
+                        if (kv.length >= 2) {
+                            try { cnt.put(kv[0], Integer.parseInt(kv[1])); } catch (Throwable ignore) {}
+                        }
+                    }
+                    for (String p : s) {
+                        Row r = new Row();
+                        r.pkg = p;
+                        r.label = labelOf(p);
+                        r.cache = cnt.containsKey(p) ? cnt.get(p) : 0;
+                        out.add(r);
+                    }
+                }
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        scoped.clear();
+                        if (s != null) scoped.addAll(s);
+                        rows.clear();
+                        rows.addAll(out);
+                        for (Row r : rows) r.icon = iconOf(r.pkg);
+                        adapter.notifyDataSetChanged();
+                        countText.setText(rows.isEmpty() ? "（空）" : rows.size() + " 个");
+                        if (s == null) {
+                            noteText.setText("读不到 LSPosed 配置（root 没授权？）。"
+                                    + "点「＋ 添加应用」会再请求一次。");
+                        } else if (rows.isEmpty()) {
+                            noteText.setText("还没有加入任何应用。点「＋ 添加应用」勾选要翻译的应用。");
+                        } else {
+                            int total = 0;
+                            for (Row r : rows) total += r.cache;
+                            noteText.setText("点一行进入该应用的详情（清缓存 / 重启 / 移出）。"
+                                    + "合计译文 " + total + " 条");
+                            queryStats();
+                        }
+                    }
+                });
+            }
+        }, "fdtrans-reload").start();
+    }
+
+    private String labelOf(String pkg) {
+        try {
+            android.content.pm.PackageManager pm = getPackageManager();
+            return pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString();
+        } catch (Throwable t) {
+            return pkg;
+        }
+    }
+
+    private Drawable iconOf(String pkg) {
+        try {
+            android.content.pm.PackageManager pm = getPackageManager();
+            return pm.getApplicationIcon(pkg);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private String version() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Throwable t) {
+            return "?";
+        }
+    }
+
+    // ---- UI 小工具 ----
     private TextView text(String s, int sp, int color) {
         TextView t = new TextView(this);
         t.setText(s);
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
         t.setTextColor(color);
-        t.setLineSpacing(0f, 1.25f);
+        t.setLineSpacing(0f, 1.3f);
         return t;
     }
 
-    private View box(String head, String body) {
+    private LinearLayout card() {
         LinearLayout l = new LinearLayout(this);
         l.setOrientation(LinearLayout.VERTICAL);
-        l.setBackground(round(0xFF1E1E1E));
-        l.setPadding(32, 28, 32, 28);
-        TextView h = text(head, 13, 0xFF80CBC4);
-        h.setTypeface(h.getTypeface(), android.graphics.Typeface.BOLD);
-        l.addView(h, lp(0));
-        l.addView(text(body, 14, 0xFFD0D0D0), lp(8));
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(0xFF1A1A1A);
+        g.setCornerRadius(dp(18));
+        l.setBackground(g);
+        l.setPadding(dp(20), dp(18), dp(20), dp(18));
         return l;
     }
 
-    private GradientDrawable round(int color) {
+    private Button btn(String s, int bg) {
+        Button b = new Button(this);
+        b.setText(s);
+        b.setAllCaps(false);
+        b.setTextSize(14);
+        b.setTextColor(0xFFFFFFFF);
         GradientDrawable g = new GradientDrawable();
-        g.setColor(color);
-        g.setCornerRadius(28f);
-        return g;
+        g.setColor(bg);
+        g.setCornerRadius(dp(12));
+        b.setBackground(g);
+        return b;
     }
 
     private LinearLayout.LayoutParams lp(int topDp) {
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        p.topMargin = (int) (topDp * getResources().getDisplayMetrics().density);
+        p.topMargin = dp(topDp);
         return p;
     }
 
-    // ---- LSPosed 作用域管理（走 root，直接改 modules_config.db）----
-    private static final String CFG_DB = "/data/adb/lspd/config/modules_config.db";
-    private static final String MOD_PKG = "com.kxxy.fdtrans";
-
-    private String su(String cmd) {
-        Process p = null;
-        try {
-            p = new ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start();
-            java.io.BufferedReader r = new java.io.BufferedReader(
-                    new java.io.InputStreamReader(p.getInputStream()));
-            StringBuilder sb = new StringBuilder();
-            String l;
-            while ((l = r.readLine()) != null) sb.append(l).append('\n');
-            p.waitFor();
-            return sb.toString();
-        } catch (Throwable t) {
-            return "ERR " + t;
-        } finally {
-            if (p != null) try { p.destroy(); } catch (Throwable ignore) { }
-        }
+    private LinearLayout.LayoutParams weight(float w) {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, w);
+        p.rightMargin = dp(6);
+        return p;
     }
 
-    private void refreshScopeAsync() {
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                final String out = su("sqlite3 " + CFG_DB
-                        + " \"select app_pkg_name from scope where module_pkg_name='" + MOD_PKG
-                        + "' order by app_pkg_name;\" 2>&1");
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (scopeList == null) return;
-                        if (out.startsWith("ERR")) {
-                            scopeList.setText("作用域：读不到（" + out + "）\n可能还没给过 root 权限");
-                            return;
-                        }
-                        String[] lines = out.trim().split("\n");
-                        int n = out.trim().isEmpty() ? 0 : lines.length;
-                        scopeList.setText("作用域（" + n + " 个）：" + (n == 0 ? "无" : "")
-                                + (n == 0 ? "" : "\n" + out.trim()));
-                    }
-                });
-            }
-        }, "fdtrans-scope").start();
-    }
-
-    private void scopeEdit(final boolean add, final String pkg) {
-        toast(add ? "正在加入…（首次会弹 root 授权）" : "正在移出…");
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                String sql = add
-                        ? "INSERT OR REPLACE INTO scope(module_pkg_name,app_pkg_name,user_id) VALUES('"
-                          + MOD_PKG + "','" + pkg + "',0);"
-                        : "DELETE FROM scope WHERE module_pkg_name='" + MOD_PKG
-                          + "' AND app_pkg_name='" + pkg + "';";
-                String out = su("sqlite3 " + CFG_DB + " \"" + sql + "\" 2>&1; echo done");
-                // 重启 lspd（守守护脚本会在 15-22 秒内把它拉回来）
-                su("rm -f /data/adb/lspd/monitor; kill -9 $(pidof lspd) 2>/dev/null; echo killed");
-                if (!add) su("am force-stop " + pkg);
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        toast(add ? "已加入，约 20 秒后生效，请重开该应用"
-                                  : "已移出，重开该应用后恢复原文");
-                        refreshScopeAsync();
-                    }
-                });
-            }
-        }, "fdtrans-scope-edit").start();
+    private int dp(int v) {
+        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
+                getResources().getDisplayMetrics());
     }
 
     private void toast(String s) {
-        Toast.makeText(this, s, Toast.LENGTH_LONG).show();
+        Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
     }
 
-    /**
-     * 后台静默启动预翻译：不把 F-Droid 切到前台。
-     * 1) 先发一条预翻译广播（F-Droid 已在跑就直接开工）
-     * 2) 给 F-Droid 的 exported 诊断接收器发广播，把进程拉起来（无界面）
-     * 3) 800/1800/3200ms 重发预翻译广播，用同一个 req 去重
-     */
-    private void startSilent(final int mode) {
-        final long req = System.currentTimeMillis();
-        final Intent cmd = new Intent(Config.ACTION);
-        cmd.setPackage(Config.REMOTE_PKG);
-        cmd.putExtra("prewarm", mode);
-        cmd.putExtra("req", req);
+    private class Adapter extends BaseAdapter {
+        @Override
+        public int getCount() { return rows.size(); }
 
-        Runnable fire = new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    sendBroadcast(cmd);
-                } catch (Throwable ignore) { }
+        @Override
+        public Object getItem(int i) { return rows.get(i); }
+
+        @Override
+        public long getItemId(int i) { return i; }
+
+        @Override
+        public View getView(int pos, View cv, ViewGroup parent) {
+            LinearLayout row;
+            if (cv instanceof LinearLayout) {
+                row = (LinearLayout) cv;
+            } else {
+                row = new LinearLayout(Settings.this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setPadding(dp(2), dp(9), dp(2), dp(9));
             }
-        };
-        fire.run();
+            row.removeAllViews();
+            Row r = rows.get(pos);
 
-        try {
-            Intent wake = new Intent();
-            wake.setComponent(new android.content.ComponentName("org.fdroid.fdroid",
-                    "androidx.work.impl.diagnostics.DiagnosticsReceiver"));
-            wake.setAction("androidx.work.diagnostics.REQUEST_DIAGNOSTICS");
-            sendBroadcast(wake);
-            android.util.Log.i("FDTrans", "headless start sent via DiagnosticsReceiver");
-        } catch (Throwable t) {
-            android.util.Log.w("FDTrans", "headless start err " + t);
+            ImageView iv = new ImageView(Settings.this);
+            if (r.icon != null) iv.setImageDrawable(r.icon);
+            row.addView(iv, new LinearLayout.LayoutParams(dp(40), dp(40)));
+
+            LinearLayout col = new LinearLayout(Settings.this);
+            col.setOrientation(LinearLayout.VERTICAL);
+            col.setPadding(dp(14), 0, dp(8), 0);
+            TextView name = text(r.label, 15, 0xFFFFFFFF);
+            col.addView(name);
+            String cnt = r.known ? ("译文 " + r.cache + " 条") : "未运行，打开一次后统计";
+            TextView sub = text(r.pkg + " · " + cnt, 11, 0xFF888888);
+            col.addView(sub);
+            row.addView(col, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            TextView arrow = text("›", 20, 0xFF666666);
+            row.addView(arrow);
+            return row;
         }
-
-        // F-Droid 冷启动可能要 3-6 秒，收到 running 回包前每 700ms 补一枪（req 去重，重复无害）
-        prewarmAck = false;
-        final android.os.Handler h = new android.os.Handler(getMainLooper());
-        final int[] tries = {0};
-        h.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (prewarmAck || tries[0] >= 20) return;
-                tries[0]++;
-                fire.run();
-                h.postDelayed(this, 700L);
-            }
-        }, 700L);
-    }
-
-    /** 旧方案：拉起 F-Droid 后回到本页（已不再使用）。 */
-    private void comeBack() {
-        final android.os.Handler h = new android.os.Handler(getMainLooper());
-        // F-Droid 冷启动会晚于第一次回跳，重复三次保证落回本页
-        for (final long delay : new long[]{2600L, 5200L, 8200L}) {
-            h.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        Intent i = new Intent(Settings.this, Settings.class);
-                        i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-                                | Intent.FLAG_ACTIVITY_NEW_TASK);
-                        startActivity(i);
-                    } catch (Throwable ignore) { }
-                }
-            }, delay);
-        }
-    }
-
-    /** int 额外值版本（预热模式等）。 */
-    private void pushToTargetInt(final String key, final int value) {
-        Intent launch = getPackageManager().getLaunchIntentForPackage(Config.REMOTE_PKG);
-        if (launch != null) {
-            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            try {
-                startActivity(launch);
-            } catch (Throwable ignore) {
-            }
-        }
-        final Intent i = new Intent(Config.ACTION);
-        i.setPackage(Config.REMOTE_PKG);
-        i.putExtra(key, value);
-        new android.os.Handler(getMainLooper()).postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    sendBroadcast(i);
-                    android.util.Log.i("FDTrans", "broadcast sent " + key + "=" + value);
-                } catch (Throwable t) {
-                    android.util.Log.w("FDTrans", "broadcast fail " + t);
-                }
-            }
-        }, 1800);
-    }
-
-    /** 拉起 F-Droid 再延迟发广播：目标进程不在时广播会被丢弃。 */
-    private void pushToTarget(final String key, final Object value) {
-        Intent launch = getPackageManager().getLaunchIntentForPackage(Config.REMOTE_PKG);
-        if (launch != null) {
-            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            try {
-                startActivity(launch);
-            } catch (Throwable ignore) {
-            }
-        }
-        final Intent i = new Intent(Config.ACTION);
-        i.setPackage(Config.REMOTE_PKG);
-        if (value instanceof Boolean) i.putExtra(key, (Boolean) value);
-        else if (value instanceof Integer) i.putExtra(key, (Integer) value);
-        else i.putExtra(key, (Long) value);
-        new android.os.Handler(getMainLooper()).postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    sendBroadcast(i);
-                    android.util.Log.i("FDTrans", "broadcast sent " + key);
-                } catch (Throwable t) {
-                    android.util.Log.w("FDTrans", "broadcast fail " + t);
-                }
-            }
-        }, 1800);
     }
 }
