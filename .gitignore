@@ -1,0 +1,9 @@
+# build artifacts
+*.apk
+*.idsig
+classes/
+dex/
+classlist.txt
+aligned.apk
+base.apk
+withdex.apk
