@@ -45,6 +45,7 @@ public class Settings extends Activity {
         Drawable icon;
         int cache;
         boolean known;
+        String probe;
     }
 
     private SharedPreferences sp;
@@ -113,6 +114,21 @@ public class Settings extends Activity {
             }
         });
         card1.addView(swNames, lp(14));
+
+        Switch swDbg = new Switch(this);
+        swDbg.setText("诊断日志（排查某些应用没翻译）");
+        swDbg.setTextSize(15);
+        swDbg.setTextColor(0xFFEEEEEE);
+        swDbg.setChecked(sp.getBoolean("debug", false));
+        swDbg.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(android.widget.CompoundButton btn, boolean v) {
+                sp.edit().putBoolean("debug", v).apply();
+                Push.bool(Settings.this, scoped, "debug", v);
+                toast(v ? "已开：logcat 里看 FDTrans 的 hook skip / skip# 日志" : "已关诊断日志");
+            }
+        });
+        card1.addView(swDbg, lp(10));
         card1.addView(text("开关会推给所有已加入的应用；没在运行的下次打开时沿用上次保存的值。",
                 12, 0xFF7E7E7E), lp(12));
         root.addView(card1, lp(20));
@@ -385,12 +401,21 @@ public class Settings extends Activity {
                     for (String p : s) {
                         cmd.append("n=$(wc -l < /data/user/0/").append(p)
                            .append("/files/fdtrans-cache.tsv 2>/dev/null); echo \"")
-                           .append(p).append(" ${n:-0}\"; ");
+                           .append(p).append(" ${n:-0}\"; ")
+                           .append("echo \"P ").append(p).append(" $(grep '^probe=' /data/user/0/")
+                           .append(p).append("/files/fdtrans-probe.txt 2>/dev/null | cut -c7-)\"; ");
                     }
                     String res = cmd.length() == 0 ? "" : Scope.su(cmd.toString());
                     java.util.Map<String, Integer> cnt = new java.util.HashMap<String, Integer>();
+                    java.util.Map<String, String> probe = new java.util.HashMap<String, String>();
                     for (String line : res.split("\n")) {
-                        String[] kv = line.trim().split("\\s+");
+                        String t = line.trim();
+                        if (t.startsWith("P ")) {
+                            int sp = t.indexOf(' ', 2);
+                            if (sp > 2) probe.put(t.substring(2, sp), t.substring(sp + 1).trim());
+                            continue;
+                        }
+                        String[] kv = t.split("\\s+");
                         if (kv.length >= 2) {
                             try { cnt.put(kv[0], Integer.parseInt(kv[1])); } catch (Throwable ignore) {}
                         }
@@ -400,6 +425,9 @@ public class Settings extends Activity {
                         r.pkg = p;
                         r.label = labelOf(p);
                         r.cache = cnt.containsKey(p) ? cnt.get(p) : 0;
+                        r.known = cnt.containsKey(p);
+                        String pr = probe.get(p);
+                        if (pr != null && pr.length() > 0) r.probe = pr;
                         out.add(r);
                     }
                 }
@@ -548,7 +576,13 @@ public class Settings extends Activity {
             TextView name = text(r.label, 15, 0xFFFFFFFF);
             col.addView(name);
             String cnt = r.known ? ("译文 " + r.cache + " 条") : "未运行，打开一次后统计";
-            TextView sub = text(r.pkg + " · " + cnt, 11, 0xFF888888);
+            String badge = "";
+            if (r.probe != null) {
+                if (r.probe.contains("自绘") || r.probe.contains("找不到可 hook")) badge = " · ⚠ 可能翻不到";
+                else badge = " · ✓ 可翻";
+            }
+            TextView sub = text(r.pkg + " · " + cnt + badge, 11,
+                    r.probe != null && r.probe.contains("自绘") ? 0xFFB08050 : 0xFF888888);
             col.addView(sub);
             row.addView(col, new LinearLayout.LayoutParams(0,
                     ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
