@@ -200,6 +200,7 @@ public final class Preload {
                         if (dst == null || dst.length() == 0) continue;
                         Translator.put(src, dst);
                         out.append(Translator.esc(src)).append('\t').append(Translator.esc(dst)).append('\n');
+                        saved++;
                     }
                 } else {
                     // 整批失败：逐条兜底
@@ -208,6 +209,7 @@ public final class Preload {
                         if (dst == null || dst.length() == 0) continue;
                         Translator.put(src, dst);
                         out.append(Translator.esc(src)).append('\t').append(Translator.esc(dst)).append('\n');
+                        saved++;
                     }
                 }
                 done += batch.size();
