@@ -269,14 +269,28 @@ public final class Translator {
             return true;
         } catch (Throwable t) {
             Log.w(TAG, "bing token err " + t);
+            noteNet(t);
             return false;
         } finally {
             if (c != null) c.disconnect();
         }
     }
 
+    /** 无网络（DNS 解析失败 / 无网络可用）时置 true，供预翻译循环暂停等待 */
+    private static volatile boolean netDown;
+    public static boolean netDown() { return netDown; }
+    static void setNetDown(boolean v) { netDown = v; }
+
+    private static void noteNet(Throwable t) {
+        if (t instanceof java.net.UnknownHostException
+                || (t != null && t.getMessage() != null
+                    && t.getMessage().contains("Unable to resolve host"))) {
+            netDown = true;
+        }
+    }
+
     private static String callBing(String text) {
-        for (int attempt = 0; attempt < 2; attempt++) {
+        for (int attempt = 0; attempt < 4; attempt++) {
             if (!ensureBing()) return null;
             HttpURLConnection c = null;
             try {
@@ -301,6 +315,12 @@ public final class Translator {
                 if (code != 200) {
                     Log.w(TAG, "bing http " + code + " for " + short_(text));
                     if (code == 401 || code == 403) { bingToken = null; continue; }
+                    if (code == 429) {
+                        // Bing 按 IP 限流：退避后再试，别把条目当成失败丢掉
+                        try { Thread.sleep(2500L + 2500L * attempt); } catch (InterruptedException ignore) { }
+                        bingToken = null;
+                        continue;
+                    }
                     return null;
                 }
                 StringBuilder sb = new StringBuilder(4096);
@@ -310,10 +330,11 @@ public final class Translator {
                 while ((n = br.read(buf)) > 0) sb.append(buf, 0, n);
                 br.close();
                 String out = pickBing(sb.toString());
-                if (out != null) return out;
+                if (out != null) { netDown = false; return out; }
                 bingToken = null; // 解析失败多半是 token 失效
             } catch (Throwable t) {
                 Log.w(TAG, "bing err " + t);
+                noteNet(t);
             } finally {
                 if (c != null) c.disconnect();
             }
@@ -375,6 +396,7 @@ public final class Translator {
         }
         String raw = callBing(sb.toString());
         if (raw == null || raw.length() == 0) return null;
+        netDown = false;
         String[] parts = raw.split("\\s*\\|\\|\\|\\s*");
         if (parts.length != items.size()) {
             Log.w(TAG, "batch mismatch " + parts.length + " vs " + items.size());
