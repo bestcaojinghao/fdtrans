@@ -32,6 +32,8 @@ public class Main implements IXposedHookLoadPackage {
                     "com.android.phone", "com.android.bluetooth", "com.android.inputmethod.latin",
                     "com.android.providers.media", "com.android.packageinstaller"));
     private static final String AST = "androidx.compose.ui.text.AnnotatedString";
+    private static final java.util.concurrent.atomic.AtomicInteger SKIPPED =
+            new java.util.concurrent.atomic.AtomicInteger();
 
     /** 安静期：最后一条译文到达后再等这么久才重建，避免连续刷新闪烁 */
     private static final long DEBOUNCE_MS = 700L;
@@ -48,8 +50,12 @@ public class Main implements IXposedHookLoadPackage {
     private static final java.util.regex.Pattern VERSION =
             java.util.regex.Pattern.compile("^[vV]?\\d+(\\.\\d+)+.*");
     /** 13 MB / 4.2 GiB 这类大小串，翻了反而看不懂 */
+    /** 体积/数量这类值不该翻：13 MB / 99k / 1.2M / 3.4GB */
     private static final java.util.regex.Pattern SIZE =
-            java.util.regex.Pattern.compile("^[\\d.,]+\\s*[kKMGT]?i?[bB]\\b.*");
+            java.util.regex.Pattern.compile("^[\\d.,]+\\s*[kKMGT]?i?[bB]?\\s*(free|可用|B)?$");
+    /** 单独的数值+单位后缀（99k → 9.9万 这种误翻） */
+    private static final java.util.regex.Pattern NUM_UNIT =
+            java.util.regex.Pattern.compile("^[\\d.,]+\\s*[kKMGT]?$");
 
     /** 懒创建：模块类在 zygote fork 早期就被加载，那时 main Looper 还不存在。 */
     private static volatile Handler uiHandler;
@@ -86,6 +92,44 @@ public class Main implements IXposedHookLoadPackage {
         DICT.put("Versions", "版本");
         DICT.put("Description", "描述");
         DICT.put("Permissions", "权限");
+        // 专有名词/技术名：翻成中文就是错的（Dart → 飞镖），映射到自己 = 跳过
+        String[] keep = {
+                "Dart", "Kotlin", "Java", "Rust", "Go", "Python", "Ruby", "PHP", "Swift", "Scala",
+                "Flutter", "Compose", "Gradle", "Maven", "Node", "npm", "Deno", "Bun", "React",
+                "Vue", "Svelte", "Angular", "JavaScript", "TypeScript", "HTML", "CSS", "JSON",
+                "YAML", "TOML", "SQL", "SQLite", "Redis", "Docker", "Kubernetes", "Git", "GitHub",
+                "GitLab", "Gitee", "Linux", "Unix", "macOS", "Windows", "Android", "iOS", "Chrome",
+                "Firefox", "Safari", "Edge", "WebView", "Electron", "Unity", "Unreal", "Godot",
+                "RustDesk", "Termux", "Magisk", "LSPosed", "Xposed", "Shizuku", "Root", "ADB",
+                "SDK", "NDK", "APK", "IPA", "API", "GPU", "CPU", "RAM", "HTTP", "HTTPS", "TCP",
+                "UDP", "DNS", "VPN", "SSH", "FTP", "TLS", "SSL", "Socket", "Proxy", "Tor",
+                "Bluetooth", "WiFi", "NFC", "USB", "OTG", "LLM", "GPT", "AI", "ML", "NLP",
+                "WSL", "GPL", "MIT", "Apache", "BSD", "FOSS", "OSS", "PR", "CI", "CD", "DevOps",
+                "CMake", "Makefile", "Rust", "Golang", "Node.js", "Next.js", "Nuxt", "Vite",
+                "Webpack", "Babel", "ESLint", "Prettier", "Jest", "Pytest", "Cargo", "Pip"
+        };
+        for (String k : keep) DICT.put(k, k);
+        // 高频界面词：翻成中文、不加括号（比 MT 准，也不该保留英文）
+        String[][] ui = {
+                {"Home", "首页"}, {"Apps", "应用"}, {"App", "应用"}, {"Privacy", "隐私"},
+                {"History", "历史"}, {"Settings", "设置"}, {"Search", "搜索"},
+                {"Install", "安装"}, {"Installed", "已安装"}, {"Update", "更新"},
+                {"Updates", "更新"}, {"Open", "打开"}, {"Close", "关闭"}, {"Back", "返回"},
+                {"Next", "下一步"}, {"Done", "完成"}, {"Cancel", "取消"}, {"OK", "确定"},
+                {"More", "更多"}, {"All", "全部"}, {"New", "新增"}, {"Free", "免费"},
+                {"Paid", "付费"}, {"Pro", "专业版"}, {"Beta", "测试版"}, {"Add", "添加"},
+                {"Edit", "编辑"}, {"Delete", "删除"}, {"Share", "分享"}, {"Save", "保存"},
+                {"Login", "登录"}, {"Logout", "退出登录"}, {"Sign in", "登录"},
+                {"Sign up", "注册"}, {"Skip", "跳过"}, {"Continue", "继续"},
+                {"Active", "活跃"}, {"Inactive", "未启用"}, {"Enabled", "已启用"},
+                {"Disabled", "已停用"}, {"Loading", "加载中"}, {"Retry", "重试"},
+                {"Refresh", "刷新"}, {"Copy", "复制"}, {"Paste", "粘贴"}, {"Undo", "撤销"},
+                {"Safe", "安全"}, {"Unsafe", "不安全"}, {"Block", "屏蔽"}, {"Allow", "允许"},
+                {"Download", "下载"}, {"Upload", "上传"}, {"Size", "大小"},
+                {"Version", "版本"}, {"About", "关于"}, {"Help", "帮助"},
+                {"Notifications", "通知"}, {"Language", "语言"}, {"Theme", "主题"}
+        };
+        for (String[] kv : ui) DICT.put(kv[0], kv[1]);
     }
 
     @Override
@@ -95,6 +139,7 @@ public class Main implements IXposedHookLoadPackage {
         if (SKIP.contains(pkg)) return;
         if (pkg.startsWith("com.kxxy.")) return;   // 自家模块不互相 hook
         Log("module loaded in " + pkg);
+        final ClassLoader cl = lp.classLoader;
         startAt = System.currentTimeMillis();
 
         // Application 创建后才知道 filesDir
@@ -109,6 +154,7 @@ public class Main implements IXposedHookLoadPackage {
                                 loadPrefs(a);
                                 File dir = a.getFilesDir();
                                 Translator.init(a, dir);
+                                installComposeHooks(a, cl);
                                 Prewarm.resumeIfNeeded(a);
                                 registerCfgReceiver(a);
                                 Log("cache dir = " + dir + " enabled=" + Config.enabled());
@@ -176,48 +222,13 @@ public class Main implements IXposedHookLoadPackage {
             XposedHelpers.findAndHookMethod(tvCls, "setText", CharSequence.class,
                     "android.widget.TextView$BufferType", tvHook);
             XposedHelpers.findAndHookMethod(tvCls, "setText", CharSequence.class, tvHook);
+                tvOk = true;
             Log("TextView hook ok");
         } catch (Throwable t) {
             Log("TextView hook skip: " + t);
         }
 
-        try {
-            Class<?> ast = XposedHelpers.findClass(AST, lp.classLoader);
-            Log("AnnotatedString found: " + ast);
-            XposedBridge.hookAllConstructors(ast, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    if (!Config.enabled()) return;
-                    try {
-                        String src = firstString(param.args);
-                        if (src == null || src.length() == 0) return;
-
-                        String tr = DICT.get(src);
-                        if (tr == null) {
-                            if (!shouldTranslate(src)) return;
-                            tr = Translator.get(src);
-                            if (tr == null) {
-                                Translator.submit(src);
-                                return;
-                            }
-                        }
-                        if (tr.equals(src)) return;
-                        // 应用名这类专名：默认显示成「原名（中文）」，既认得出又不全是英文
-                        if (Config.skipNames() && isNameLike(src)
-                                && !tr.contains(src) && !src.contains(tr)) {
-                            tr = src + "（" + tr + "）";
-                        }
-                        // 关键：文本长度变了，span 的字符区间还是按原文算的，
-                        // 不清掉会让 Compose 的 setSpan 抛 IndexOutOfBoundsException（此前闪退根因）。
-                        dropSpans(param.thisObject);
-                        XposedHelpers.setObjectField(param.thisObject, "text", tr);
-                        Log("REPLACED: [" + clip(src) + "] -> [" + clip(tr) + "]");
-                    } catch (Throwable ignore) { }
-                }
-            });
-        } catch (Throwable t) {
-            Log("hook fail " + t);
-        }
+        // Compose 文本层无 Context 时也得装（真正安装挪到 Application.onCreate，见 installComposeHooks）
     }
 
     /** 翻译完成 -> 安静期后重建当前 Activity，让英文变中文。 */
@@ -324,15 +335,20 @@ public class Main implements IXposedHookLoadPackage {
     }
 
     /** 需要翻译的判据：含拉丁字母、不含已存在的中日韩字符、不是 URL/包名/版本号。 */
-    /** 单 token、短、无空格 → 多半是应用/项目专名（Buddy / Immich / Element）。 */
+    /**
+     * 单 token、短、无空格 → 多半是应用/项目专名（Buddy / Immich / Element），保留英文并括号给中文。
+     * 全大写（ANDROID / WINDOWS / INSTALL）不算专名，是界面标签，直接翻，不加括号。
+     */
     static boolean isNameLike(String s) {
         int n = s.length();
         if (n < 2 || n > 12) return false;
+        boolean lower = false;
         for (int i = 0; i < n; i++) {
             char c = s.charAt(i);
             if (c == ' ' || c == '\t' || c == '-') return false;
+            if (c >= 'a' && c <= 'z') lower = true;
         }
-        return true;
+        return lower;
     }
 
     static boolean shouldTranslate(String s) {
@@ -349,6 +365,7 @@ public class Main implements IXposedHookLoadPackage {
         }
         if (!latin) return false;
         if (SIZE.matcher(s).matches()) return false;
+        if (NUM_UNIT.matcher(s).matches()) return false;
         if (ASCII_ONLY.matcher(s).matches()) {
             if (HAS_SEP.matcher(s).matches()) return false;
             if (VERSION.matcher(s).matches()) return false;
@@ -371,6 +388,7 @@ public class Main implements IXposedHookLoadPackage {
             Config.setEnabled(sp.getBoolean("enabled", true));
             Config.setClearCacheAt(sp.getLong("clearCacheAt", 0L));
             Config.setSkipNames(sp.getBoolean("skipNames", true));
+            Config.setDebug(sp.getBoolean("debug", false));
             String eng = sp.getString("engine", "bing");
             if ("mymemory".equals(eng) && !sp.getBoolean("engineMigrated", false)) {
                 eng = "bing";   // 老版本默认是 mymemory，迁移到 bing
@@ -402,6 +420,11 @@ public class Main implements IXposedHookLoadPackage {
                             Config.setEngine(en);
                             e.putString("engine", en);
                         }
+                        if (i.hasExtra("debug")) {
+                            boolean v = i.getBooleanExtra("debug", false);
+                            Config.setDebug(v);
+                            e.putBoolean("debug", v);
+                        }
                         if (i.hasExtra("skipNames")) {
                             boolean v = i.getBooleanExtra("skipNames", true);
                             Config.setSkipNames(v);
@@ -409,6 +432,9 @@ public class Main implements IXposedHookLoadPackage {
                         }
                         if (i.getBooleanExtra("queryStat", false)) {
                             Translator.report(true);
+                        }
+                        if (i.getBooleanExtra("queryProbe", false)) {
+                            sendProbe(a);
                         }
                         if (i.hasExtra("queryStatus")) {
                             Prewarm.sendStatus(a);
@@ -441,6 +467,418 @@ public class Main implements IXposedHookLoadPackage {
             Log("cfg receiver registered");
         } catch (Throwable t) {
             Log("cfg receiver err " + t);
+        }
+    }
+
+    /**
+     * Compose 文本层 hook。类名不能写死：Compose Multiplatform 的类叫
+     * androidx$compose$ui$text$AnnotatedString。先试常见名，再从目标 APK 的 dex 里扫。
+     */
+    private static void installComposeHooks(Application app, ClassLoader cl) {
+        java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<String>();
+        names.add(AST);
+        names.add("androidx$compose$ui$text$AnnotatedString");
+        try {
+            names.addAll(ComposeText.discover(app));
+        } catch (Throwable t) {
+            Log("compose discover fail " + t);
+        }
+        // 诊断：这个 ClassLoader 到底能不能加载它
+        try {
+            Log("cl=" + cl.getClass().getName() + " parent=" + cl.getParent());
+        } catch (Throwable ignore) { }
+        try {
+            Class<?> c = Class.forName("androidx.compose.ui.text.AnnotatedString", false, cl);
+            Log("forName ok " + c);
+        } catch (Throwable t) {
+            Log("forName fail " + t);
+        }
+        int hooked = 0;
+        for (String n : names) {
+            try {
+                Class<?> ast = XposedHelpers.findClass(n, cl);
+                XposedBridge.hookAllConstructors(ast, composeCtorHook());
+                Log("AnnotatedString found: " + ast);
+                hooked++;
+            } catch (Throwable t) {
+                Log("hook skip " + n + ": " + t);
+            }
+        }
+        Log("compose hooks installed: " + hooked + " / " + names.size());
+        installParagraphHooks(cl);
+        installPlainTextCacheHooks(cl);
+        if (Config.debug()) installDiagHooks(cl);
+        int structOk = 0;
+        if (hooked == 0) structOk = installStructuralHooks(app, cl);
+        probeAndReport(app, hooked, structOk);
+    }
+
+    /** 能力探测：把「这个应用能不能翻」的结果广播给模块主界面。 */
+    private static volatile String lastProbe;
+    private static volatile int lastNamed, lastStruct;
+    private static volatile boolean tvOk;
+
+    private static void probeAndReport(Application app, int named, int struct) {
+        lastNamed = named;
+        lastStruct = struct;
+        try {
+            lastProbe = Dex.probe(app, tvOk);
+        } catch (Throwable t) {
+            lastProbe = "探测失败：" + t;
+        }
+        Log("probe: named=" + named + " struct=" + struct + " tv=" + tvOk + " para=" + paraHooks
+                + " textcache=" + textCacheHooks + " · " + lastProbe);
+        // 落盘：主界面/终端都能事后查，不依赖前台
+        try {
+            java.io.File f = new java.io.File(app.getFilesDir(), "fdtrans-probe.txt");
+            java.io.FileWriter w = new java.io.FileWriter(f, false);
+            w.write("pkg=" + app.getPackageName() + "\n");
+            w.write("named=" + named + "\n");
+            w.write("struct=" + struct + "\n");
+            w.write("tv=" + tvOk + "\n");
+            w.write("at=" + System.currentTimeMillis() + "\n");
+            w.write("para=" + paraHooks + "\n");
+            w.write("textcache=" + textCacheHooks + "\n");
+            w.write("probe=" + lastProbe + "\n");
+            w.close();
+            // 目标应用私有目录，模块主界面用 root 读
+            Runtime.getRuntime().exec(new String[]{"sh", "-c",
+                    "chmod 644 '" + f.getAbsolutePath() + "'"}).waitFor();
+        } catch (Throwable t) {
+            Log("probe write fail " + t);
+        }
+        sendProbe(app);
+    }
+
+    static void sendProbe(Application app) {
+        try {
+            android.content.Intent i = new android.content.Intent(Config.PROBE);
+            i.setPackage(Config.SELF);
+            i.putExtra("pkg", app.getPackageName());
+            i.putExtra("named", lastNamed);
+            i.putExtra("struct", lastStruct);
+            i.putExtra("tv", tvOk);
+            i.putExtra("probe", lastProbe);
+            app.sendBroadcast(i);
+        } catch (Throwable t) {
+            Log("sendProbe fail " + t);
+        }
+    }
+
+    /**
+     * 名字被 R8 混淆的应用（Compose Multiplatform 之类）：按构造函数签名找 AnnotatedString，
+     * 再用反射找那个 String 字段（名字可能是 a/b/c），把 List 字段清空防止 span 越界。
+     */
+    private static int installStructuralHooks(Application app, ClassLoader cl) {
+        java.util.List<String> cands;
+        try {
+            cands = Dex.annotatedStringCandidates(app);
+        } catch (Throwable t) {
+            Log("struct discover fail " + t);
+            return 0;
+        }
+        Log("struct candidates: " + cands);
+        int ok = 0;
+        for (String n : cands) {
+            try {
+                Class<?> c = XposedHelpers.findClass(n, cl);
+                if (textFieldOf(c) == null) {
+                    Log("struct skip (no String field): " + n);
+                    continue;
+                }
+                XposedBridge.hookAllConstructors(c, structuralCtorHook());
+                Log("struct hooked: " + c);
+                ok++;
+            } catch (Throwable t) {
+                Log("struct hook skip " + n + ": " + t);
+            }
+        }
+        Log("structural hooks installed: " + ok);
+        return ok;
+    }
+
+    /**
+     * 新版 Compose（1.9 起）的纯 String 文本根本不构造 AnnotatedString：
+     * BasicText(String) → ParagraphLayoutCache(String,...) → AndroidParagraphIntrinsics(String,...)。
+     * 所以再挂一层最深的排版入口，谁都要经过这里。
+     */
+    private static void installParagraphHooks(ClassLoader cl) {
+        String[] names = {
+                "androidx.compose.ui.text.platform.AndroidParagraphIntrinsics",
+                "androidx$compose$ui$text$platform$AndroidParagraphIntrinsics"
+        };
+        int ok = 0;
+        for (String n : names) {
+            try {
+                Class<?> c = XposedHelpers.findClass(n, cl);
+                XposedBridge.hookAllConstructors(c, paragraphCtorHook());
+                Log("paragraph hook ok: " + n);
+                ok++;
+            } catch (Throwable t) {
+                Log("paragraph hook skip " + n + ": " + t);
+            }
+        }
+        paraHooks = ok;
+    }
+
+    private static volatile int paraHooks;
+
+    /**
+     * Compose 1.9 的纯 String 文本从 BasicText 直接进 ParagraphLayoutCache(String, TextStyle, ...)，
+     * 既不造 AnnotatedString 也不马上造 ParagraphIntrinsics（Vanillify 实测）。
+     * 这里把入参 String 换掉，路径上没有 span 列表，不存在越界风险。
+     */
+    private static void installPlainTextCacheHooks(ClassLoader cl) {
+        String[] names = {
+                "androidx.compose.foundation.text.modifiers.ParagraphLayoutCache",
+                "androidx.compose.foundation.text.modifiers.MultiParagraphLayoutCache"
+        };
+        int ok = 0;
+        for (String n : names) {
+            try {
+                Class<?> c = XposedHelpers.findClass(n, cl);
+                XposedBridge.hookAllConstructors(c, stringArgCtorHook("cache"));
+                Log("text cache hook ok: " + n);
+                ok++;
+            } catch (Throwable t) {
+                Log("text cache hook skip " + n + ": " + t);
+            }
+        }
+        textCacheHooks = ok;
+    }
+
+    private static volatile int textCacheHooks;
+
+    /** 通用的「构造函数第 0 个参数是 String 就翻译」hook。 */
+    private static XC_MethodHook stringArgCtorHook(final String tag) {
+        return new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                if (!Config.enabled()) return;
+                try {
+                    Object[] a = param.args;
+                    if (a == null || a.length == 0 || !(a[0] instanceof String)) return;
+                    String src = (String) a[0];
+                    String tr = translate(src, tag);
+                    if (tr == null) return;
+                    a[0] = tr;
+                    Log("REPLACED(" + tag + "): [" + clip(src) + "] -> [" + clip(tr) + "]");
+                    maybeRefresh();
+                } catch (Throwable ignore) { }
+            }
+        };
+    }
+
+    /** 统一翻译入口：字典 → 判据 → 缓存 → 未命中就排队。返回 null 表示不改写。 */
+    static String translate(String src, String tag) {
+        if (src == null || src.length() < 2 || src.length() > 2000) return null;
+        String tr = DICT.get(src);
+        boolean fromDict = tr != null;
+        if (tr == null) {
+            if (!shouldTranslate(src)) {
+                skip("rule", src);
+                return null;
+            }
+            tr = Translator.get(src);
+            if (tr == null) {
+                Translator.submit(src);
+                return null;
+            }
+        }
+        if (tr.equals(src)) return null;
+        if (!fromDict && Config.skipNames() && isNameLike(src)
+                && !tr.contains(src) && !src.contains(tr)) {
+            tr = src + "（" + tr + "）";
+        }
+        return tr;
+    }
+
+    /** 诊断：确认 hook 到底落在哪个类、UI 走的是哪条文本通路。只在前 N 次打日志。 */
+    private static final java.util.concurrent.atomic.AtomicInteger DIAG_N =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    private static void installDiagHooks(ClassLoader cl) {
+        String[][] targets = {
+                {"androidx.compose.ui.platform.AbstractComposeView", "setContent"},
+                {"androidx.compose.ui.platform.AndroidComposeView", "onDraw"},
+                {"androidx.compose.ui.text.MultiParagraphIntrinsics", "<init>"},
+                {"androidx.compose.foundation.text.modifiers.ParagraphLayoutCache", "<init>"}
+        };
+        for (String[] t : targets) {
+            try {
+                Class<?> c = XposedHelpers.findClass(t[0], cl);
+                XC_MethodHook h = new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam p) {
+                        if (DIAG_N.incrementAndGet() > 12) return;
+                        Object a0 = (p.args != null && p.args.length > 0) ? p.args[0] : null;
+                        Log("DIAG " + p.method.getName() + " a0="
+                                + (a0 == null ? "null" : a0.getClass().getName() + "[" + clip(String.valueOf(a0)) + "]"));
+                    }
+                };
+                if ("<init>".equals(t[1])) {
+                    XposedBridge.hookAllConstructors(c, h);
+                } else {
+                    XposedBridge.hookAllMethods(c, t[1], h);
+                }
+                Log("diag ok " + t[0] + "#" + t[1]);
+            } catch (Throwable e) {
+                Log("diag skip " + t[0] + "#" + t[1] + ": " + e);
+            }
+        }
+    }
+
+
+    private static XC_MethodHook paragraphCtorHook() {
+        return new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                if (!Config.enabled()) return;
+                try {
+                    Object[] a = param.args;
+                    if (a == null || a.length < 2) return;
+                    if (!(a[0] instanceof String)) return;
+                    String src = (String) a[0];
+                    if (src.length() < 2 || src.length() > 2000) return;
+                    String tr = DICT.get(src);
+                    if (tr == null) {
+                        if (!shouldTranslate(src)) {
+                            skip("rule", src);
+                            return;
+                        }
+                        tr = Translator.get(src);
+                        if (tr == null) {
+                            Translator.submit(src);
+                            return;
+                        }
+                    }
+                    if (tr.equals(src)) return;
+                    if (Config.skipNames() && isNameLike(src)
+                            && !tr.contains(src) && !src.contains(tr)) {
+                        tr = src + "（" + tr + "）";
+                    }
+                    a[0] = tr;
+                    // span 区间按原文长度算，译文长度不同会越界 → 直接清空
+                    for (int i = 2; i < a.length && i < 4; i++) {
+                        if (a[i] instanceof java.util.List && !((java.util.List) a[i]).isEmpty()) {
+                            a[i] = java.util.Collections.emptyList();
+                        }
+                    }
+                    Log("REPLACED(para): [" + clip(src) + "] -> [" + clip(tr) + "]");
+                } catch (Throwable ignore) { }
+            }
+        };
+    }
+
+    private static final java.util.Map<Class<?>, java.lang.reflect.Field> TEXT_FIELDS =
+            new java.util.HashMap<Class<?>, java.lang.reflect.Field>();
+
+    private static java.lang.reflect.Field textFieldOf(Class<?> c) {
+        synchronized (TEXT_FIELDS) {
+            if (TEXT_FIELDS.containsKey(c)) return TEXT_FIELDS.get(c);
+            java.lang.reflect.Field best = null, any = null;
+            try {
+                for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                    if (f.getType() != String.class) continue;
+                    if (any == null) any = f;
+                    if ("text".equals(f.getName())) { best = f; break; }
+                }
+            } catch (Throwable ignore) { }
+            java.lang.reflect.Field r = best != null ? best : any;
+            if (r != null) r.setAccessible(true);
+            TEXT_FIELDS.put(c, r);
+            return r;
+        }
+    }
+
+    /** 把这类对象里所有 List 字段清空（AnnotatedString 的 spanStyles / annotations）。 */
+    private static void clearLists(Object o) {
+        try {
+            for (java.lang.reflect.Field f : o.getClass().getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                if (!java.util.List.class.isAssignableFrom(f.getType())) continue;
+                f.setAccessible(true);
+                if (f.get(o) != null) f.set(o, null);
+            }
+        } catch (Throwable ignore) { }
+    }
+
+    private static XC_MethodHook structuralCtorHook() {
+        return new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                if (!Config.enabled()) return;
+                try {
+                    String src = firstString(param.args);
+                    if (src == null || src.length() == 0) return;
+                    String tr = DICT.get(src);
+                    if (tr == null) {
+                        if (!shouldTranslate(src)) {
+                            skip("rule", src);
+                            return;
+                        }
+                        tr = Translator.get(src);
+                        if (tr == null) {
+                            Translator.submit(src);
+                            return;
+                        }
+                    }
+                    if (tr.equals(src)) return;
+                    if (Config.skipNames() && isNameLike(src)
+                            && !tr.contains(src) && !src.contains(tr)) {
+                        tr = src + "（" + tr + "）";
+                    }
+                    java.lang.reflect.Field tf = textFieldOf(param.thisObject.getClass());
+                    if (tf == null) return;
+                    clearLists(param.thisObject);
+                    tf.set(param.thisObject, tr);
+                    Log("REPLACED(struct): [" + clip(src) + "] -> [" + clip(tr) + "]");
+                } catch (Throwable ignore) { }
+            }
+        };
+    }
+
+    private static XC_MethodHook composeCtorHook() {
+        return new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                if (!Config.enabled()) return;
+                try {
+                    String src = firstString(param.args);
+                    if (src == null || src.length() == 0) return;
+
+                    String tr = DICT.get(src);
+                    if (tr == null) {
+                        if (!shouldTranslate(src)) {
+                            skip("rule", src);
+                            return;
+                        }
+                        tr = Translator.get(src);
+                        if (tr == null) {
+                            Translator.submit(src);
+                            return;
+                        }
+                    }
+                    if (tr.equals(src)) return;
+                    if (Config.skipNames() && isNameLike(src)
+                            && !tr.contains(src) && !src.contains(tr)) {
+                        tr = src + "（" + tr + "）";
+                    }
+                    dropSpans(param.thisObject);
+                    XposedHelpers.setObjectField(param.thisObject, "text", tr);
+                    Log("REPLACED: [" + clip(src) + "] -> [" + clip(tr) + "]");
+                } catch (Throwable ignore) { }
+            }
+        };
+    }
+
+    /** 被规则挡下的文本：只在 debug 打开时打日志，按原因计数，避免刷屏。 */
+    private static void skip(String why, String s) {
+        if (!Config.debug()) return;
+        int n = SKIPPED.incrementAndGet();
+        if (n % 50 == 0) {
+            Log("skip#" + n + " (" + why + ") e.g. [" + clip(s) + "]");
         }
     }
 }
