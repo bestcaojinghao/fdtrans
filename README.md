@@ -146,3 +146,13 @@ setsid sh /data/local/tmp/runlspd.sh >/data/local/tmp/lspd.log 2>&1 < /dev/null 
 ```
 
 `runlspd.sh` 必须带上 shell 的整套环境变量（`BOOTCLASSPATH`/`ANDROID_ART_ROOT` 等），并先 `cd /data/adb/modules/zygisk_lsposed`，否则 lspd 静默 `exit(0)`。
+
+## 更新日志
+
+- **1.10.6** 修复详情页反复重建（每个界面类重建上限 4 次 / 90 秒、最小间隔 4 秒）；译文缓存去重；代翻服务分批失败对半重试
+- **1.10.x** 新增后台「代翻服务」（Bridge）：没联网权限的应用也能翻；`su -mm` 读目标应用私有目录
+- **1.9.x** 无网络权限的进程自动改为把待翻文本 spool 给模块 app 代翻
+- **1.8.0** 四条文本通路（AnnotatedString / 结构匹配 / ParagraphLayoutCache / TextView）+ 应用「能不能翻」检测
+- **1.3.1** 通用主界面 + 实时进度条
+- **1.0.0** 从 F-Droid 专用改为通用（作用域内任意应用）
+- **0.9.0** 首次发布：F-Droid 英文界面机翻
