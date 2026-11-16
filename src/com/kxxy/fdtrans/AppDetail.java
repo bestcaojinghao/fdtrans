@@ -1,7 +1,10 @@
 package com.kxxy.fdtrans;
 
 import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
@@ -26,6 +29,8 @@ public class AppDetail extends Activity {
     private String pkg;
     private String label;
     private TextView cacheText;
+    private TextView probeText;
+    private BroadcastReceiver probeRecv;
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     @Override
@@ -63,6 +68,19 @@ public class AppDetail extends Activity {
         cacheText = text("译文：读取中…", 14, 0xFFBDBDBD);
         root.addView(cacheText, lp(20));
 
+        probeText = text("能不能翻：检测中…", 13, 0xFF9E9E9E);
+        root.addView(probeText, lp(8));
+
+        Button probeBtn = btn("重新检测能否翻译", 0xFF1B2F1B);
+        probeBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                probeText.setText("能不能翻：检测中…");
+                queryProbe();
+            }
+        });
+        root.addView(probeBtn, lp(10));
+
         Button open = btn("打开这个应用", 0xFF1565C0);
         open.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -89,6 +107,23 @@ public class AppDetail extends Activity {
                             public void run() {
                                 toast("已清空，重开应用后会重新翻译");
                                 refreshCache();
+        probeRecv = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context c, Intent i) {
+                if (!Config.PROBE.equals(i.getAction())) return;
+                if (!pkg.equals(i.getStringExtra("pkg"))) return;
+                applyProbe(i);
+            }
+        };
+        try {
+            IntentFilter f = new IntentFilter(Config.PROBE);
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(probeRecv, f, Context.RECEIVER_EXPORTED);
+            } else {
+                registerReceiver(probeRecv, f);
+            }
+        } catch (Throwable ignore) { }
+        queryProbe();
                             }
                         });
                     }
@@ -148,6 +183,36 @@ public class AppDetail extends Activity {
 
     private String cachePath() {
         return "/data/user/0/" + pkg + "/files/fdtrans-cache.tsv";
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (probeRecv != null) { try { unregisterReceiver(probeRecv); } catch (Throwable ignore) { } }
+        super.onDestroy();
+    }
+
+    private void applyProbe(Intent i) {
+        boolean tv = i.getBooleanExtra("tv", false);
+        int named = i.getIntExtra("named", 0), struct = i.getIntExtra("struct", 0);
+        String p = i.getStringExtra("probe");
+        StringBuilder sb = new StringBuilder("能不能翻：");
+        if (named > 0) sb.append("Compose 标准命名 ✓");
+        else if (struct > 0) sb.append("Compose 混淆名（结构匹配 ").append(struct).append(" 个）✓");
+        else sb.append("Compose ✗");
+        sb.append(" · TextView ").append(tv ? "✓" : "✗");
+        if (p != null && p.length() > 0) sb.append("\n").append(p);
+        probeText.setText(sb.toString());
+    }
+
+    private void queryProbe() {
+        try {
+            Intent i = new Intent(Config.ACTION);
+            i.setPackage(pkg);
+            i.putExtra("queryProbe", true);
+            sendBroadcast(i);
+        } catch (Throwable t) {
+            probeText.setText("能不能翻：目标应用没在跑（打开一次再回来）");
+        }
     }
 
     private void refreshCache() {
