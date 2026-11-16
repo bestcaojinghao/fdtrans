@@ -1,148 +1,118 @@
-# FDTrans — F-Droid 界面中英实时翻译
+# FDTrans — 通用实时机翻（LSPosed）
 
-一个 LSPosed/Xposed 模块：把 F-Droid 里的英文**就地**翻成简体中文。
-不加悬浮球、不加悬浮窗、不改布局——直接改 Compose 文本层，译文出现在原文的位置。
+LSPosed 模块：把目标应用界面里的英文**直接替换成简体中文**，没有悬浮窗、没有悬浮球、不改变布局。
+最初为 F-Droid 而写，1.0 起改成**通用**：任何加进作用域的应用都能翻（F-Droid、ShizuStore、GitHub Store 等已实测）。
 
-```
-Buddy                              →  (保持英文，专名不译)
-Bahn-Vorhersage                    →  火车时刻表预测
-CloudSound - SoundCloud facilitator for Podcini.A
-                                   →  CloudSound - Podcini.A 的 SoundCloud 助手
-```
+## 成品
+
+- 模块 APK：`fdtrans/mod/FDTrans-1.0.1.apk`
+- 包名：`com.kxxy.fdtrans`，versionName 1.0.1
+- 签名：v3，证书 DN `CN=FQ`
+
+## 支持的界面类型
+
+| 界面 | hook 点 | 说明 |
+|---|---|---|
+| Jetpack Compose | `androidx.compose.ui.text.AnnotatedString` 全部构造器 | 改写 `text` 字段并清 span |
+| View（TextView 系） | `TextView.setText(CharSequence[, BufferType])` | 只替换纯 `String`，带 span 的放过 |
 
 ## 原理
 
-F-Droid 2.x 是 Jetpack Compose 应用，界面上所有文字最终都会变成一个
-`androidx.compose.ui.text.AnnotatedString`。模块 hook 它的所有构造器，
-在构造完成后把 `text` 字段替换成译文：
+Compose 的每段文本最终变成 `AnnotatedString`，View 的每段文本最终走 `setText`。模块在目标进程里 hook 这两个点，拿到原文：
 
-1. `AnnotatedString` 构造 → 取首个 `String` 参数作为原文
-2. 命中缓存 → 直接写回 `text` 字段
-3. 未命中 → 后台线程送翻译，完成后 `Activity.recreate()` 让界面重排版
-4. 替换时必须清掉 `spanStyles` / `paragraphStyles` / `annotations`——
-   这些 Range 是按原文长度算的，长度一变 Compose 建布局就会抛
-   `IndexOutOfBoundsException: setSpan (0 ... 140) ends beyond length 54`
+- 命中缓存 → 直接改写（Compose 改 `text` 字段，View 直接替换 `setText` 的实参），界面立刻是中文
+- 未命中 → 丢后台线程翻译，完成后节流重建当前 Activity（打字时、键盘弹起时不重建）
 
-刷新不是每次翻译完都重建：译文安静 0.7 秒后才重建一次（debounce，最长等 6 秒），
-检测到输入框获得焦点或输入法弹出时跳过重建，避免打断打字。
+**改 text 必须同时清 span**：`AnnotatedString.spanStyles`/`paragraphStyles` 的区间按原文长度算，译文变短后越界，Compose 抛
+`IndexOutOfBoundsException: setSpan (0 ... 140) ends beyond length 54`（早期"一直在崩溃"的根因）。
+`Main.dropSpans()` 把 `spanStylesOrNull`/`paragraphStylesOrNull` 置 null、`annotations` 置空解决。
 
-## 翻译引擎
+## 翻译链路
 
-默认真实引擎是 **Bing 免费网页接口**（`cn.bing.com/ttranslatev3`）：
-从 `/translator` 页面抓 `IG` / `key` / `token`，POST 表单，token 55 分钟刷新一次，
-失效时重取。失败自动回退 MyMemory。
+- 引擎：Bing 免费网页接口 `cn.bing.com/ttranslatev3`（`usedLLM:true`，失败自动回退 MyMemory）
+- 批量：多条短文本用 ` ||| ` 拼一次请求，返回按同样分隔符切回
+- 三级缓存：LRU 内存 → 磁盘 `fdtrans-cache.tsv`（**各目标应用自己的私有目录**）→ 网络
+- 过滤：只翻含拉丁字母、不含中日韩、2–2000 字、非 URL/包名/版本号/大小串（`13 MB`）的文本
+- 专名：`Config.skipNames=true` 时显示成 `原名（中文）`，如 `ColorBlendr -> ColorBlendr（色彩混合器）`
 
-批量吞吐：多条短文本用 ` ||| ` 拼成一次请求（单次可吃 4000 字符），
-译文再按分隔符切回；分段数不匹配则回退逐条翻译。
+## 用法（通用）
 
-## 全量预热
+1. 装模块 APK，在 LSPosed 里启用本模块（不用手动勾作用域，下一步的按钮会改配置）
+2. 打开「FDTrans 设置」→「翻译哪个应用」→ 输入目标包名（如 `me.timschneeberger.shizustore`）→ 点「加入」
+   - 走 root 直接改 `/data/adb/lspd/config/modules_config.db` 的 `scope` 表，然后重启 lspd（约 20 秒）
+   - 首次会弹一次 root 授权
+3. 重开目标应用，界面英文即变中文
 
-F-Droid 本地索引 `fdroid_db` 里 `localizedSummary` / `localizedName` 是设备语言
-解析后的文本。模块跑在 F-Droid 进程内，所以能直接只读打开这个库，把英文条目
-批量翻好写进缓存（`files/fdtrans-cache.tsv`）。
+批量预翻译（目前只针对 F-Droid 的本地索引库）：`预翻译整个仓库（名称+摘要）`，进度条实时显示。
+注意：**冷启动后的后台进程在部分 ROM 上没有网络**，所以预翻译要在目标应用至少打开过一次之后再跑；模块遇到无网会显示「等待网络」并自动续跑。
 
-实测（约 5000 应用的真实索引）：
+## F-Droid 专属说明（0.x 时期）
 
-| 项 | 数量 | 字符量 |
-|---|---|---|
-| 索引应用 | 5008 | — |
-| 应用名仍英文 | 4788 | 63,391 |
-| 摘要仍英文 | 3543 | 197,763 |
-| 预热结果 | 5612 条 / 221 秒 | 缓存 5048 条 |
+## 用法
 
-设置页两个按钮：
+1. 安装 `FDTrans-0.3.apk`
+2. LSPosed 里启用模块，作用域勾选 **F-Droid**
+3. 打开「F-Droid 实时翻译」图标进设置页，确认「启用实时翻译」是开的
+4. 打开 F-Droid —— 应用名、摘要会变中文
 
-- **预翻译整个仓库（名称+摘要）** —— 几分钟，跑完列表页全中文
-- **预翻译详细描述（慢）** —— 描述量级大，为详情页备货
+设置页能做的事：开关实时翻译（会立刻拉起 F-Droid 并广播新状态，目标进程不在时广播会丢）、清空翻译缓存、直接打开 F-Droid。
 
-## 安装
+## 开关是怎么跨进程生效的
 
-前提：Magisk + LSPosed（Zygisk），已安装 F-Droid 2.x。
+模块进程和 F-Droid 进程 uid 不同，跨进程读模块私有 prefs 会被权限挡（文件 660），用 ContentResolver 查自定义 provider 又被 Android 11+ 的 package visibility 挡住（`IllegalArgumentException: Unknown authority`）。最终方案：
 
-```bash
-# 1. 装模块
-adb install -r FDTrans-0.9.apk     # 或 root: pm install -r -t FDTrans-0.9.apk
+- 权威值存在 **F-Droid 自己的** SharedPreferences（`fdtrans-hook.xml`）
+- 设置页改动后先 `startActivity` 拉起 F-Droid，1.8 秒后发显式广播 `com.kxxy.fdtrans.CFG`（`setPackage("org.fdroid.fdroid")`）
+- F-Droid 侧在 `Application.onCreate` 读 prefs，并注册动态 receiver 接收后续变更，收到即落盘
 
-# 2. 在 LSPosed 管理器里启用模块，作用域勾选 org.fdroid.fdroid
+## 实测证据
 
-# 3. 重启 F-Droid（模块只在目标进程启动时注入）
+关机重启后完整复跑一遍（`127.0.0.1:5555`，PJZ110 / Android 16）：
+
+```
+I/FDTrans: module loaded in org.fdroid.fdroid
+I/FDTrans: AnnotatedString found: class androidx.compose.ui.text.AnnotatedString
+I/FDTrans: prefs loaded enabled=true clearAt=0
+I/FDTrans: cfg receiver registered
+I/FDTrans: cache loaded: 9
+I/FDTrans: cache dir = /data/user/0/org.fdroid.fdroid/files enabled=true
+I/FDTrans: REPLACED: [Librera Reader] -> [Librera 阅读器]
 ```
 
-命令行注册（LSPosed 管理器不方便时）：
+界面 dump（详情页）：
+
+```
+text="Librera 阅读器"        ← 原文 "Librera Reader"
+text="书籍和 PDF 阅读器"
+```
+
+关掉开关后同一页面：`text="Librera Reader"`，`prefs loaded enabled=false`，`REPLACED=0`。
+
+稳定性：F-Droid 连续前台 35 秒，`FATAL EXCEPTION` 计数 0，进程 PID 不变，REPLACED 21 条。
+
+## 未做 / 已知限制
+
+- 长描述要展开后才加载，展开那一下会看到英文，下次进入才中文
+- 每次新译文到达会 `recreate()` 一次界面（限流 2.5 秒 / 窗口 180 秒），视觉上闪一下
+- 专有名词（Buddy→巴迪、Tuta Mail 等）会被直译，有意保留原名的可在 `Main.DICT` 里加映射
+- 未做多语言目标（固定 zh-CN）
+
+## 重建
+
+```bash
+cd fdtrans/mod && bash build.sh FDTrans-0.3.apk
+```
+
+javac → d8（必须 `grep -v '/de/robv/'` 剔除 Xposed API 类，否则 LSPosed 拒绝加载）→ aapt2 link → 塞 dex → zipalign → apksigner。
+
+装完必须更新 LSPosed 的 apk_path 并重启 lspd，否则注入的是旧 APK：
 
 ```bash
 P=$(pm path com.kxxy.fdtrans | sed 's/package://')
-sqlite3 /data/adb/lspd/config/modules_config.db "
-  INSERT OR REPLACE INTO modules(module_pkg_name,apk_path) VALUES('com.kxxy.fdtrans','$P');
-  INSERT OR REPLACE INTO modules_state(module_pkg_name,user_id,enabled,scope_request_blocked)
-    VALUES('com.kxxy.fdtrans',0,1,0);
-  INSERT OR REPLACE INTO scope(module_pkg_name,app_pkg_name,user_id)
-    VALUES('com.kxxy.fdtrans','org.fdroid.fdroid',0);"
-kill -9 $(pidof lspd)   # 需要时手动拉起见下
+sqlite3 /data/adb/lspd/config/modules_config.db \
+  "UPDATE modules SET apk_path='$P' WHERE module_pkg_name='com.kxxy.fdtrans';"
+kill -9 $(pidof lspd); rm -f /data/adb/lspd/monitor
+setsid sh /data/local/tmp/runlspd.sh >/data/local/tmp/lspd.log 2>&1 < /dev/null &
 ```
 
-验证注入：
-
-```bash
-logcat -s FDTrans:*
-# I FDTrans: module loaded in org.fdroid.fdroid
-# I FDTrans: AnnotatedString found: class androidx.compose.ui.text.AnnotatedString
-# I FDTrans: REPLACED: [Librera Reader] -> [Librera 阅读器]
-```
-
-## 从源码构建（不需要 Android Studio）
-
-`build.sh` 用 `javac + d8 + aapt2 + zipalign + apksigner` 手工打包：
-
-```bash
-export ANDROID_JAR=/path/to/android.jar        # platforms/android-35/android.jar
-export BUILD_TOOLS=/path/to/build-tools
-bash build.sh FDTrans.apk
-```
-
-两个必须注意的点：
-
-1. **d8 输入要排除 `de/robv/**`**（Xposed API 的编译期 stub）。
-   打进去的话 LSPosed 会拒绝加载：
-   `The Xposed API classes are compiled into the module's APK.`
-2. `stubs/` 只在编译期参与，不进 dex。
-
-## 已知限制
-
-- 只对 `org.fdroid.fdroid` 生效，别的 Compose 应用换个包名就能复用，但要自己加作用域
-- 单字应用名默认不翻（`skipNames`）——`Buddy` → `巴迪` 这种没必要；开关可关掉
-- 译文长度变化后 Compose 的 span 信息会被丢弃，纯文本替换，富文本样式（粗体/链接）
-  在译文里会丢失
-- 描述文本量大（千万字符级），默认按需翻；全量预热要跑几小时
-- LSPosed 的配置服务 `lspd` 挂了模块就不会注入，表现为"装了没反应"
-
-## 预翻译（离线预跑一遍，之后打开就全是中文）
-
-设置页两个按钮，都在**后台静默执行**，不会把 F-Droid 切到前台：
-
-- **预翻译整个仓库（名称+摘要）**：约 5000 条，实测 ~220 秒
-- **预翻译详细描述（慢，约 1-3 小时）**：长文本，按行拆段批量翻
-
-执行机制：
-
-1. 先向 F-Droid 进程发一条预翻译广播（它已在跑就直接开工）
-2. 若进程不在，向 `androidx.work.impl.diagnostics.DiagnosticsReceiver`（F-Droid 内 exported 接收器）
-   发广播把进程**无界面**拉起
-3. 之后每 700ms 补发一次（同 `req` 去重），最多 20 次，直到收到进度回包
-4. 任务在 F-Droid 进程内以低优先级线程跑，持有 `PARTIAL_WAKE_LOCK`，屏幕熄灭也继续
-5. 进程被系统杀掉后下次启动自动续跑（`prewarmWant` 标记）
-
-进度通过广播 `com.kxxy.fdtrans.PROGRESS`（done/total/phase/cache）回传，设置页有进度条，
-离开设置页再回来会重新查询当前状态。
-
-## 声明
-
-本项目是 **[F-Droid](https://gitlab.com/fdroid/fdroidclient) 客户端（GPLv3）的第三方辅助模块**，
-只做一件事：把界面里仍是英文的应用名/摘要/描述就地翻成中文，作为中文显示的补充。
-不包含、不重新分发 F-Droid 的任何代码或二进制，与 F-Droid 项目及其维护者无隶属或背书关系。
-
-**非商业**：不收费、无广告、无捐赠、无内购、不收集任何用户数据。全文见 [NOTICE.md](NOTICE.md)。
-
-## 许可
-
-本仓库代码 MIT（见 [LICENSE](LICENSE)）；MIT 不改变 F-Droid 客户端自身的许可证。
+`runlspd.sh` 必须带上 shell 的整套环境变量（`BOOTCLASSPATH`/`ANDROID_ART_ROOT` 等），并先 `cd /data/adb/modules/zygisk_lsposed`，否则 lspd 静默 `exit(0)`。
