@@ -2,6 +2,7 @@ package com.kxxy.fdtrans;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
@@ -13,6 +14,7 @@ import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
@@ -27,6 +29,10 @@ public class Settings extends Activity {
     private static final int PAD = 44;
 
     private SharedPreferences sp;
+    private ProgressBar bar;
+    private TextView progText;
+    private android.content.BroadcastReceiver progRecv;
+    private volatile boolean prewarmAck;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -93,6 +99,19 @@ public class Settings extends Activity {
                         + "• 已有译文直接命中缓存，只有新出现的英文才走网络\n"
                         + "• 若某次界面更新后仍是英文，重新进入该页面即可"), lp(14));
 
+        // ---- 进度面板 ----
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackground(round(0xFF1E1E1E));
+        panel.setPadding(32, 28, 32, 28);
+        progText = text("预翻译进度：尚未开始", 14, 0xFFD0D0D0);
+        panel.addView(progText, lp(0));
+        bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        bar.setMax(100);
+        bar.setProgress(0);
+        panel.addView(bar, lp(12));
+        root.addView(panel, lp(22));
+
         Button pre = new Button(this);
         pre.setText("预翻译整个仓库（名称+摘要）");
         pre.setAllCaps(false);
@@ -101,8 +120,8 @@ public class Settings extends Activity {
         pre.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                pushToTargetInt("prewarm", 1);
-                toast("已开始预翻译（约 5000 个应用的名称与摘要），完成后 F-Droid 里全是中文");
+                startSilent(1);
+                toast("已在后台开始预翻译（名称+摘要），你可以继续用手机，回来这里看进度");
             }
         });
         root.addView(pre, lp(22));
@@ -115,8 +134,8 @@ public class Settings extends Activity {
         pre2.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                pushToTargetInt("prewarm", 2);
-                toast("已开始预翻译描述，会持续跑一会儿，期间 F-Droid 可以正常用");
+                startSilent(2);
+                toast("已在后台开始预翻译详细描述，会跑一会儿，不影响你使用");
             }
         });
         root.addView(pre2, lp(10));
@@ -172,6 +191,76 @@ public class Settings extends Activity {
         setContentView(sc);
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        progRecv = new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(android.content.Context c, Intent i) {
+                int done = i.getIntExtra("done", 0);
+                int total = i.getIntExtra("total", 0);
+                boolean running = i.getBooleanExtra("running", false);
+                String phase = i.getStringExtra("phase");
+                int cache = i.getIntExtra("cache", 0);
+                if (running) prewarmAck = true;
+                int pct = total > 0 ? (int) (done * 100L / total) : 0;
+                if (bar != null) {
+                    bar.setMax(100);
+                    bar.setProgress(running ? pct : (total > 0 ? 100 : 0));
+                    bar.setIndeterminate(running && total == 0);
+                }
+                if (progText != null) {
+                    if (total == 0 && !running) {
+                        progText.setText("预翻译进度：尚未开始（缓存 " + cache + " 条）");
+                    } else if (running) {
+                        progText.setText("预翻译中：" + done + " / " + total + "（" + pct + "%）"
+                                + "\n阶段 " + (phase == null ? "-" : phase) + "，缓存 " + cache + " 条");
+                    } else {
+                        progText.setText("预翻译完成：本次处理 " + (total > 0 ? total : done)
+                                + " 条（100%）\n缓存共 " + cache + " 条，界面已可直接复用");
+                    }
+                }
+            }
+        };
+        IntentFilter f = new IntentFilter(Prewarm.ACTION_PROGRESS);
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(progRecv, f, android.content.Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(progRecv, f);
+        }
+        // 问一次 F-Droid 当前状态（它在跑才会回）
+        final boolean[] replied = {false};
+        final Runnable[] mark = new Runnable[1];
+        Intent q = new Intent(Config.ACTION);
+        q.setPackage(Config.REMOTE_PKG);
+        q.putExtra("queryStatus", true);
+        try {
+            sendBroadcast(q);
+        } catch (Throwable ignore) { }
+        final android.content.BroadcastReceiver[] holder = {progRecv};
+        final android.content.BroadcastReceiver orig = progRecv;
+        // 2.5s 内没收到回包 → 说明 F-Droid 没在跑
+        new android.os.Handler(getMainLooper()).postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (progText != null && progText.getText().toString().contains("尚未开始")) {
+                    progText.setText("预翻译进度：未知（F-Droid 没在运行，点下面的按钮会自动启动它）");
+                }
+            }
+        }, 2500);
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (progRecv != null) {
+            try {
+                unregisterReceiver(progRecv);
+            } catch (Throwable ignore) { }
+            progRecv = null;
+        }
+    }
+
     private TextView text(String s, int sp, int color) {
         TextView t = new TextView(this);
         t.setText(s);
@@ -209,6 +298,74 @@ public class Settings extends Activity {
 
     private void toast(String s) {
         Toast.makeText(this, s, Toast.LENGTH_LONG).show();
+    }
+
+    /**
+     * 后台静默启动预翻译：不把 F-Droid 切到前台。
+     * 1) 先发一条预翻译广播（F-Droid 已在跑就直接开工）
+     * 2) 给 F-Droid 的 exported 诊断接收器发广播，把进程拉起来（无界面）
+     * 3) 800/1800/3200ms 重发预翻译广播，用同一个 req 去重
+     */
+    private void startSilent(final int mode) {
+        final long req = System.currentTimeMillis();
+        final Intent cmd = new Intent(Config.ACTION);
+        cmd.setPackage(Config.REMOTE_PKG);
+        cmd.putExtra("prewarm", mode);
+        cmd.putExtra("req", req);
+
+        Runnable fire = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    sendBroadcast(cmd);
+                } catch (Throwable ignore) { }
+            }
+        };
+        fire.run();
+
+        try {
+            Intent wake = new Intent();
+            wake.setComponent(new android.content.ComponentName("org.fdroid.fdroid",
+                    "androidx.work.impl.diagnostics.DiagnosticsReceiver"));
+            wake.setAction("androidx.work.diagnostics.REQUEST_DIAGNOSTICS");
+            sendBroadcast(wake);
+            android.util.Log.i("FDTrans", "headless start sent via DiagnosticsReceiver");
+        } catch (Throwable t) {
+            android.util.Log.w("FDTrans", "headless start err " + t);
+        }
+
+        // F-Droid 冷启动可能要 3-6 秒，收到 running 回包前每 700ms 补一枪（req 去重，重复无害）
+        prewarmAck = false;
+        final android.os.Handler h = new android.os.Handler(getMainLooper());
+        final int[] tries = {0};
+        h.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (prewarmAck || tries[0] >= 20) return;
+                tries[0]++;
+                fire.run();
+                h.postDelayed(this, 700L);
+            }
+        }, 700L);
+    }
+
+    /** 旧方案：拉起 F-Droid 后回到本页（已不再使用）。 */
+    private void comeBack() {
+        final android.os.Handler h = new android.os.Handler(getMainLooper());
+        // F-Droid 冷启动会晚于第一次回跳，重复三次保证落回本页
+        for (final long delay : new long[]{2600L, 5200L, 8200L}) {
+            h.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        Intent i = new Intent(Settings.this, Settings.class);
+                        i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                                | Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(i);
+                    } catch (Throwable ignore) { }
+                }
+            }, delay);
+        }
     }
 
     /** int 额外值版本（预热模式等）。 */

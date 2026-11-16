@@ -139,6 +139,11 @@ public final class Translator {
         return src == null ? null : CACHE.get(src);
     }
 
+    /** 当前内存里缓存条数（含启动时从磁盘载入的），用于面板显示。 */
+    public static int cacheSize() {
+        return CACHE.size();
+    }
+
     public static int doneCount() {
         return DONE.get();
     }

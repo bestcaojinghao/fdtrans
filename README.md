@@ -116,6 +116,25 @@ bash build.sh FDTrans.apk
 - 描述文本量大（千万字符级），默认按需翻；全量预热要跑几小时
 - LSPosed 的配置服务 `lspd` 挂了模块就不会注入，表现为"装了没反应"
 
+## 预翻译（离线预跑一遍，之后打开就全是中文）
+
+设置页两个按钮，都在**后台静默执行**，不会把 F-Droid 切到前台：
+
+- **预翻译整个仓库（名称+摘要）**：约 5000 条，实测 ~220 秒
+- **预翻译详细描述（慢，约 1-3 小时）**：长文本，按行拆段批量翻
+
+执行机制：
+
+1. 先向 F-Droid 进程发一条预翻译广播（它已在跑就直接开工）
+2. 若进程不在，向 `androidx.work.impl.diagnostics.DiagnosticsReceiver`（F-Droid 内 exported 接收器）
+   发广播把进程**无界面**拉起
+3. 之后每 700ms 补发一次（同 `req` 去重），最多 20 次，直到收到进度回包
+4. 任务在 F-Droid 进程内以低优先级线程跑，持有 `PARTIAL_WAKE_LOCK`，屏幕熄灭也继续
+5. 进程被系统杀掉后下次启动自动续跑（`prewarmWant` 标记）
+
+进度通过广播 `com.kxxy.fdtrans.PROGRESS`（done/total/phase/cache）回传，设置页有进度条，
+离开设置页再回来会重新查询当前状态。
+
 ## 声明
 
 本项目是 **[F-Droid](https://gitlab.com/fdroid/fdroidclient) 客户端（GPLv3）的第三方辅助模块**，

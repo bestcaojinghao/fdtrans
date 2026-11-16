@@ -97,6 +97,7 @@ public class Main implements IXposedHookLoadPackage {
                                 loadPrefs(a);
                                 File dir = a.getFilesDir();
                                 Translator.init(dir);
+                                Prewarm.resumeIfNeeded(a);
                                 registerCfgReceiver(a);
                                 Log("cache dir = " + dir + " enabled=" + Config.enabled());
                             } catch (Throwable t) {
@@ -347,10 +348,14 @@ public class Main implements IXposedHookLoadPackage {
                             Config.setSkipNames(v);
                             e.putBoolean("skipNames", v);
                         }
+                        if (i.hasExtra("queryStatus")) {
+                            Prewarm.sendStatus(a);
+                        }
                         if (i.hasExtra("prewarm")) {
                             int m = i.getIntExtra("prewarm", 1);
-                            Log("prewarm requested mode=" + m);
-                            Prewarm.start(a, m);
+                            long req = i.getLongExtra("req", 0L);
+                            Log("prewarm requested mode=" + m + " req=" + req);
+                            Prewarm.start(a, m, req);
                         }
                         if (i.hasExtra("clearCacheAt")) {
                             long t = i.getLongExtra("clearCacheAt", 0L);

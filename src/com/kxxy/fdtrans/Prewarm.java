@@ -24,10 +24,17 @@ public final class Prewarm {
     private static final String TAG = "FDTrans";
     private static final String DB_NAME = "fdroid_db";
 
+    public static final String ACTION_PROGRESS = "com.kxxy.fdtrans.PROGRESS";
+
     private static volatile boolean running;
     private static volatile int done;
     private static volatile int total;
     private static volatile String phase = "";
+    private static volatile int mode = 1;
+    private static volatile long lastCast;
+    private static volatile String lastMsg = "";
+    private static volatile long lastReq = 0L;
+    private static android.os.PowerManager.WakeLock wakeLock;
 
     private Prewarm() {}
 
@@ -51,14 +58,32 @@ public final class Prewarm {
      * @param mode 1=名称+摘要，2=再加描述
      */
     public static void start(final Context ctx, final int mode) {
+        start(ctx, mode, 0L);
+    }
+
+    public static void start(final Context ctx, final int mode, final long req) {
         if (running) {
             Log.i(TAG, "prewarm already running: " + done + "/" + total);
             return;
         }
+        if (req != 0L && req == lastReq) {
+            Log.i(TAG, "prewarm dup request ignored");
+            return;
+        }
+        lastReq = req;
         running = true;
+        try {
+            if (ctx != null) {
+                ctx.getSharedPreferences(Config.PREFS, 0).edit()
+                        .putInt("prewarmWant", mode).commit();
+                acquireWakeLock(ctx);
+            }
+        } catch (Throwable ignore) { }
         done = 0;
         total = 0;
+        Prewarm.mode = mode;
         phase = "读取本地索引";
+        cast(ctx, true);
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -69,6 +94,14 @@ public final class Prewarm {
                 } finally {
                     running = false;
                     phase = "完成";
+                    releaseWakeLock();
+                    try {
+                        if (ctx != null) {
+                            ctx.getSharedPreferences(Config.PREFS, 0).edit()
+                                    .putInt("prewarmWant", 0).commit();
+                        }
+                    } catch (Throwable ignore) { }
+                    cast(ctx, true);
                 }
             }
         }, "fdtrans-prewarm");
@@ -144,6 +177,7 @@ public final class Prewarm {
                             }
                         }
                         int d = done;
+                        cast(ctx, false);
                         if (d % 200 < b.size()) {
                             long ms = System.currentTimeMillis() - t0;
                             Log.i(TAG, "prewarm " + d + "/" + total
@@ -169,12 +203,94 @@ public final class Prewarm {
         long ms = System.currentTimeMillis() - t0;
         Log.i(TAG, "prewarm done " + done + "/" + total + " in " + (ms / 1000) + "s, cache="
                 + Translator.doneCount());
+        try {
+            if (ctx != null) {
+                android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+                h.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            android.widget.Toast.makeText(ctx,
+                                    "预翻译完成：" + done + " 条", android.widget.Toast.LENGTH_LONG).show();
+                        } catch (Throwable ignore) { }
+                    }
+                });
+            }
+        } catch (Throwable ignore) { }
         if (ctx != null) {
             ctx.getSharedPreferences(Config.PREFS, 0).edit()
                     .putInt("prewarmDone", done)
                     .putLong("prewarmAt", System.currentTimeMillis())
                     .commit();
         }
+    }
+
+    /** 后台跑的时候别让 CPU 睡（屏幕灭了也能继续翻）。 */
+    private static void acquireWakeLock(Context ctx) {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) return;
+            android.os.PowerManager pm = (android.os.PowerManager)
+                    ctx.getSystemService(Context.POWER_SERVICE);
+            if (pm == null) return;
+            wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "fdtrans:prewarm");
+            wakeLock.setReferenceCounted(false);
+            wakeLock.acquire(6 * 3600 * 1000L);
+            Log.i(TAG, "wakelock acquired");
+        } catch (Throwable t) {
+            Log.w(TAG, "wakelock err " + t);
+        }
+    }
+
+    private static void releaseWakeLock() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) {
+                wakeLock.release();
+                Log.i(TAG, "wakelock released");
+            }
+        } catch (Throwable ignore) { }
+        wakeLock = null;
+    }
+
+    /** F-Droid 进程重启后，如果上次没跑完就接着跑（不受设置页是否打开影响）。 */
+    public static void resumeIfNeeded(Context ctx) {
+        if (ctx == null || running) return;
+        try {
+            int want = ctx.getSharedPreferences(Config.PREFS, 0).getInt("prewarmWant", 0);
+            if (want > 0) {
+                Log.i(TAG, "resume unfinished prewarm mode=" + want);
+                start(ctx, want, 0L);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "resume err " + t);
+        }
+    }
+
+    /** 把当前进度广播回模块设置页（跨 uid 只能靠广播，读不了对方的 prefs）。 */
+    private static void cast(Context ctx, boolean force) {
+        if (ctx == null) return;
+        long now = System.currentTimeMillis();
+        String msg = done + "/" + total;
+        if (!force && now - lastCast < 800L && msg.equals(lastMsg)) return;
+        lastCast = now;
+        lastMsg = msg;
+        try {
+            android.content.Intent i = new android.content.Intent(ACTION_PROGRESS);
+            i.setPackage("com.kxxy.fdtrans");
+            i.putExtra("running", running);
+            i.putExtra("done", done);
+            i.putExtra("total", total);
+            i.putExtra("phase", phase);
+            i.putExtra("mode", mode);
+            i.putExtra("cache", Translator.cacheSize());
+            ctx.sendBroadcast(i);
+        } catch (Throwable t) {
+            Log.w(TAG, "cast err " + t);
+        }
+    }
+
+    /** 设置页打开时查询一次当前状态。 */
+    public static void sendStatus(Context ctx) {
+        cast(ctx, true);
     }
 
     /** 从 fdroid_db 里收集要翻的英文串。 */
