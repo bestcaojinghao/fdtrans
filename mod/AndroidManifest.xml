@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.kxxy.fdtrans"
+    android:versionCode="70"
+    android:versionName="1.12.9">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+
+    <!-- targetSdk 30+ 的包可见性过滤：不加这段，getLaunchIntentForPackage("org.fdroid.fdroid")
+         恒返回 null，设置页就会误报"未安装 F-Droid"，广播也发不出去 -->
+    <queries>
+        <package android:name="org.fdroid.fdroid" />
+    </queries>
+
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:name=".App"
+        android:label="实时翻译（通用）"
+        android:hasCode="true">
+        <meta-data android:name="xposedmodule" android:value="true" />
+        <meta-data android:name="xposeddescription" android:value="界面英文实时机翻成中文：Compose 文本层 + TextView 两种 hook，作用域内任意应用生效" />
+        <meta-data android:name="xposedminversion" android:value="93" />
+        <!-- 跨进程配置读取：F-Droid 进程 uid 不同，读不到模块私有 prefs，
+             改由本 provider 提供（只读、无敏感数据） -->
+        <provider
+            android:name=".Flags"
+            android:authorities="com.kxxy.fdtrans.flags"
+            android:exported="true" />
+
+        <receiver
+            android:name=".Boot"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+        <service
+            android:name=".PreloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <service
+            android:name=".Bridge"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <activity
+            android:name=".Settings"
+            android:exported="true"
+            android:label="F-Droid 实时翻译">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    
+        <activity
+            android:name=".AppPicker"
+            android:exported="false"
+            android:label="选择要翻译的应用" />
+            <activity
+            android:name=".AppDetail"
+            android:exported="false"
+            android:label="应用详情" />
+    </application>
+</manifest>
