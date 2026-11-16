@@ -1,6 +1,7 @@
 package com.kxxy.fdtrans;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -286,6 +287,62 @@ public class Settings extends Activity {
                 }, "fdtrans-clear").start();
             }
         });
+        final Button bat = btn("允许后台常驻（关闭电池优化）", 0xFF2E4A44);
+        bat.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                try {
+                    android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+                    if (pm != null && pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                        toast("已经是允许后台运行的状态");
+                        return;
+                    }
+                    Intent i = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                    i.setData(android.net.Uri.parse("package:" + getPackageName()));
+                    startActivity(i);
+                } catch (Throwable t) {
+                    toast("打不开系统页面：" + t);
+                }
+            }
+        });
+        card4.addView(bat, lp(10));
+        card4.addView(text("不开这个的话，手机一进省电/息屏就会切断本模块的后台联网："
+                + "预翻会卡住、没联网权限的应用也翻不了（日志是 \"Unable to resolve host\"）。",
+                12, 0xFF7E7E7E), lp(8));
+
+        Button allPre = btn("全部应用一起预翻（排队跑）", 0xFF2E4A44);
+        allPre.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (scoped.isEmpty()) { toast("作用域里还没有应用"); return; }
+                Preload.enqueue(getApplicationContext(), new ArrayList<String>(scoped));
+                toast("已排队 " + scoped.size() + " 个应用，逐个预翻；进度看通知栏");
+                reload();
+            }
+        });
+        card4.addView(allPre, lp(10));
+        Button check = btn("一键体检（找出翻不了的应用）", 0xFF303030);
+        check.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toast("正在体检…");
+                final Set<String> list = new LinkedHashSet<String>(scoped);
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        final String report = Checkup.run(Settings.this, list);
+                        ui.post(new Runnable() {
+                            @Override
+                            public void run() { showReport(report); }
+                        });
+                    }
+                }, "fdtrans-checkup").start();
+            }
+        });
+        card4.addView(check, lp(10));
+        card4.addView(text("体检会逐个检查作用域里的应用：有没有联网权限（不能联网时必须开后台代翻）、"
+                + "译文缓存里已有多少条、缓存目录能不能写。翻不了的应用会在报告里标出来。",
+                12, 0xFF7E7E7E), lp(8));
         card4.addView(clearAll, lp(10));
         root.addView(card4, lp(18));
 
@@ -315,6 +372,25 @@ public class Settings extends Activity {
 
     /** 应用在前台时启动后台服务（后台状态下 startForegroundService 会被系统拒绝）。 */
     private static boolean fgAsked;
+
+    /** 用对话框把体检报告列出来（可滚动、可复制长按）。 */
+    private void showReport(String report) {
+        final TextView tv = new TextView(this);
+        tv.setText(report);
+        tv.setTextSize(12);
+        tv.setTextColor(0xFFDDDDDD);
+        tv.setTypeface(android.graphics.Typeface.MONOSPACE);
+        tv.setTextIsSelectable(true);
+        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        tv.setPadding(pad, pad, pad, pad);
+        ScrollView sv = new ScrollView(this);
+        sv.addView(tv);
+        new AlertDialog.Builder(this)
+                .setTitle("体检报告")
+                .setView(sv)
+                .setPositiveButton("好", null)
+                .show();
+    }
 
     private void startWorkers() {
         try {

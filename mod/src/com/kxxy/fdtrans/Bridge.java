@@ -138,6 +138,31 @@ public class Bridge extends Service {
     private static void checkPreloadTrigger() {
         try {
             if (loopCtx == null) return;
+            // 一键体检：跑完把报告写到 files 目录，便于外部读取/排障
+            java.io.File chk = new java.io.File(loopCtx.getFilesDir(), "checkup-now.txt");
+            if (chk.exists()) {
+                chk.delete();
+                java.util.Set<String> sc = Scope.read(loopCtx);
+                String rep = Checkup.run(loopCtx, sc == null ? new java.util.LinkedHashSet<String>() : sc);
+                try {
+                    java.io.FileOutputStream fo = new java.io.FileOutputStream(
+                            new java.io.File(loopCtx.getFilesDir(), "checkup-report.txt"));
+                    fo.write(rep.getBytes("UTF-8"));
+                    fo.close();
+                } catch (Throwable t) { Log.w(TAG, "checkup write err " + t); }
+                Log.i(TAG, "checkup report written");
+            }
+            // 全部作用域应用排队预翻
+            java.io.File all = new java.io.File(loopCtx.getFilesDir(), "preload-all-now.txt");
+            if (all.exists()) {
+                all.delete();
+                java.util.Set<String> sc2 = Scope.read(loopCtx);
+                if (sc2 != null && !sc2.isEmpty()) {
+                    Log.i(TAG, "external preload-all: " + sc2.size());
+                    Preload.enqueue(loopCtx, sc2);
+                }
+            }
+
             java.io.File f = new java.io.File(loopCtx.getFilesDir(), "preload-now.txt");
             if (!f.exists()) return;
             String body = readSmall(f);

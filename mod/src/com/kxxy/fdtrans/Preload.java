@@ -29,6 +29,9 @@ public final class Preload {
     private static volatile String phase = "";
     private static volatile PreloadService svc;
     private static volatile String lastNote = "";
+    /** 排队预翻的包（「全部应用一起预翻」用），跑完一个接一个。 */
+    private static final java.util.ArrayDeque<String> QUEUE = new java.util.ArrayDeque<String>();
+    private static volatile int queueTotal;
 
     private Preload() {}
 
@@ -101,6 +104,26 @@ public final class Preload {
         }
     }
 
+    /** 一次登记多个包，逐个预翻（单实例，跑完自动接下一个）。 */
+    public static synchronized void enqueue(final Context ctx, java.util.Collection<String> pkgs) {
+        QUEUE.clear();
+        for (String p : pkgs) { if (p != null && p.length() > 0 && !QUEUE.contains(p)) QUEUE.add(p); }
+        queueTotal = QUEUE.size();
+        android.util.Log.i("FDTrans", "preload queue=" + queueTotal);
+        startNext(ctx);
+    }
+
+    public static synchronized int queued() { return QUEUE.size(); }
+
+    public static synchronized int queueTotal() { return queueTotal; }
+
+    private static synchronized void startNext(Context ctx) {
+        if (runningPkg != null) return;
+        String p = QUEUE.poll();
+        if (p == null) { queueTotal = 0; return; }
+        start(ctx, p);
+    }
+
     public static synchronized boolean start(final Context ctx, final String pkg) {
         if (runningPkg != null) return false;
         runningPkg = pkg;
@@ -124,6 +147,10 @@ public final class Preload {
                     markPending(ctx, null);
                     PreloadService s = svc;
                     if (s != null) s.finish();
+                    if (!QUEUE.isEmpty()) {
+                        android.util.Log.i("FDTrans", "preload next, left=" + QUEUE.size());
+                        startNext(ctx);
+                    }
                 }
             }
         }, "fdtrans-preload");
@@ -155,7 +182,7 @@ public final class Preload {
         if (total == 0) return;
 
         StringBuilder out = new StringBuilder();
-        int inBatch = 0, chars = 0;
+        int inBatch = 0, chars = 0, saved = 0;
         List<String> batch = new ArrayList<String>();
         String uid = uidOf(pkg);
 
@@ -203,14 +230,15 @@ public final class Preload {
                     if (dst == null || dst.length() == 0) continue;
                     Translator.put(batch.get(i), dst);
                     out.append(Translator.esc(batch.get(i))).append('\t').append(Translator.esc(dst)).append('\n');
+                    saved++;
                 }
             }
             done += batch.size();
         }
         if (out.length() > 0) flush(pkg, out.toString(), uid);
-        try { prefs(ctx).edit().putInt("last_" + pkg, done).apply(); } catch (Throwable ignore) { }
-        phase = "完成";
-        android.util.Log.i("FDTrans", "preload " + pkg + " wrote=" + done);
+        try { prefs(ctx).edit().putInt("last_" + pkg, saved).apply(); } catch (Throwable ignore) { }
+        phase = "完成（新增 " + saved + " 条）";
+        android.util.Log.i("FDTrans", "preload " + pkg + " attempted=" + done + " saved=" + saved);
     }
 
     /** 目标应用现有缓存的 key 集合（用来跳过已经翻过的）。 */
