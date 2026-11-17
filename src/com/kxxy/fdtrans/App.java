@@ -13,17 +13,17 @@ public class App extends Application {
     @Override
     public void onCreate() {
         super.onCreate();
+        // 上次没跑完的「安装包预翻」接着跑（进程被杀/开机后自动续）
+        try { Preload.resume(this); } catch (Throwable t) { Log.w(TAG, "resume err " + t); }
         try {
             android.content.SharedPreferences sp = getSharedPreferences("fdtrans", MODE_PRIVATE);
+            Thermal.setEnabled(sp.getBoolean("thermalGate", true));
             if (!sp.getBoolean("bridgeAuto", true)) return;
+            // 只在这里起循环线程；服务由前台界面（Settings.onResume）启动。
+            // 后台进程直接 startForegroundService 会被系统拒绝（Background start not allowed），
+            // 而且会消耗掉这一次的启动配额，导致随后界面里再启动也被拒。
             Bridge.startLoop(this);
-            try {
-                Intent i = new Intent(this, Bridge.class);
-                if (android.os.Build.VERSION.SDK_INT >= 26) startForegroundService(i);
-                else startService(i);
-            } catch (Throwable ignored) {
-            }
-            Log.i(TAG, "App.onCreate started bridge");
+            Log.i(TAG, "App.onCreate started bridge loop (service left to foreground UI)");
         } catch (Throwable t) {
             Log.w(TAG, "App.onCreate bridge err " + t);
         }

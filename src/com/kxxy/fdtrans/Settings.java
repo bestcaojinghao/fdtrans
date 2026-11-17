@@ -1,6 +1,7 @@
 package com.kxxy.fdtrans;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -130,6 +131,22 @@ public class Settings extends Activity {
             }
         });
         card1.addView(swDbg, lp(10));
+
+        Switch swThermal = new Switch(this);
+        swThermal.setText("发烫时暂停翻译（建议开）");
+        swThermal.setTextSize(15);
+        swThermal.setTextColor(0xFFEEEEEE);
+        swThermal.setChecked(sp.getBoolean("thermalGate", true));
+        swThermal.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(android.widget.CompoundButton btn, boolean v) {
+                sp.edit().putBoolean("thermalGate", v).apply();
+                Thermal.setEnabled(v);
+                toast(v ? "CPU 结温 ≥52°C 或电池 ≥41°C 时自动暂停后台翻译"
+                        : "已关闭温控闸门，发烫也会继续翻译");
+            }
+        });
+        card1.addView(swThermal, lp(10));
         card1.addView(text("开关会推给所有已加入的应用；没在运行的下次打开时沿用上次保存的值。",
                 12, 0xFF7E7E7E), lp(12));
         root.addView(card1, lp(20));
@@ -286,6 +303,62 @@ public class Settings extends Activity {
                 }, "fdtrans-clear").start();
             }
         });
+        final Button bat = btn("允许后台常驻（关闭电池优化）", 0xFF2E4A44);
+        bat.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                try {
+                    android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+                    if (pm != null && pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                        toast("已经是允许后台运行的状态");
+                        return;
+                    }
+                    Intent i = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                    i.setData(android.net.Uri.parse("package:" + getPackageName()));
+                    startActivity(i);
+                } catch (Throwable t) {
+                    toast("打不开系统页面：" + t);
+                }
+            }
+        });
+        card4.addView(bat, lp(10));
+        card4.addView(text("不开这个的话，手机一进省电/息屏就会切断本模块的后台联网："
+                + "预翻会卡住、没联网权限的应用也翻不了（日志是 \"Unable to resolve host\"）。",
+                12, 0xFF7E7E7E), lp(8));
+
+        Button allPre = btn("全部应用一起预翻（排队跑）", 0xFF2E4A44);
+        allPre.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (scoped.isEmpty()) { toast("作用域里还没有应用"); return; }
+                Preload.enqueue(getApplicationContext(), new ArrayList<String>(scoped));
+                toast("已排队 " + scoped.size() + " 个应用，逐个预翻；进度看通知栏");
+                reload();
+            }
+        });
+        card4.addView(allPre, lp(10));
+        Button check = btn("一键体检（找出翻不了的应用）", 0xFF303030);
+        check.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toast("正在体检…");
+                final Set<String> list = new LinkedHashSet<String>(scoped);
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        final String report = Checkup.run(Settings.this, list);
+                        ui.post(new Runnable() {
+                            @Override
+                            public void run() { showReport(report); }
+                        });
+                    }
+                }, "fdtrans-checkup").start();
+            }
+        });
+        card4.addView(check, lp(10));
+        card4.addView(text("体检会逐个检查作用域里的应用：有没有联网权限（不能联网时必须开后台代翻）、"
+                + "译文缓存里已有多少条、缓存目录能不能写。翻不了的应用会在报告里标出来。",
+                12, 0xFF7E7E7E), lp(8));
         card4.addView(clearAll, lp(10));
         root.addView(card4, lp(18));
 
@@ -303,11 +376,82 @@ public class Settings extends Activity {
         root.addView(text("v" + version() + "  ·  通用模式（作用域内任意应用）", 11, 0xFF616161), lp(18));
 
         setContentView(sc);
+        handleAutoPreload(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(android.content.Intent i) {
+        super.onNewIntent(i);
+        setIntent(i);
+        handleAutoPreload(i);
+    }
+
+    /** 应用在前台时启动后台服务（后台状态下 startForegroundService 会被系统拒绝）。 */
+    private static boolean fgAsked;
+
+    /** 用对话框把体检报告列出来（可滚动、可复制长按）。 */
+    private void showReport(String report) {
+        final TextView tv = new TextView(this);
+        tv.setText(report);
+        tv.setTextSize(12);
+        tv.setTextColor(0xFFDDDDDD);
+        tv.setTypeface(android.graphics.Typeface.MONOSPACE);
+        tv.setTextIsSelectable(true);
+        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        tv.setPadding(pad, pad, pad, pad);
+        ScrollView sv = new ScrollView(this);
+        sv.addView(tv);
+        new AlertDialog.Builder(this)
+                .setTitle("体检报告")
+                .setView(sv)
+                .setPositiveButton("好", null)
+                .show();
+    }
+
+    private void startWorkers() {
+        try {
+            if (fgAsked) {
+                // 已经请求过一次就只确保循环线程在跑（服务重复 start 会被系统记 warning）
+                Bridge.startLoop(this);
+            } else {
+                fgAsked = true;
+                startForegroundService(new Intent(this, Bridge.class));
+            }
+            android.util.Log.i("FDTrans", "settings startWorkers: Bridge requested");
+        } catch (Throwable t) {
+            android.util.Log.w("FDTrans", "settings startWorkers bridge err " + t);
+        }
+        try {
+            if (Preload.pending(this) != null) {
+                startForegroundService(new Intent(this, PreloadService.class));
+                android.util.Log.i("FDTrans", "settings startWorkers: PreloadService requested");
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("FDTrans", "settings startWorkers preload err " + t);
+        }
+    }
+
+    /** 便于自动化/排障：am start ... --es preload <包名> 直接触发预翻（onCreate 与 onNewIntent 都要处理）。 */
+    private void handleAutoPreload(android.content.Intent i) {
+        try {
+            String auto = i == null ? null : i.getStringExtra("preload");
+            if (auto == null || auto.length() == 0) return;
+            i.removeExtra("preload");
+            boolean ok = Preload.start(getApplicationContext(), auto);
+            android.util.Log.i("FDTrans", "auto preload intent: " + auto + " started=" + ok);
+            toast(ok ? ("开始预翻：" + auto) : ("正在预翻 " + Preload.runningPkg()));
+        } catch (Throwable ignore) { }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        // 等窗口真正可见后再请求前台服务：系统按"进程是否可见"判定，
+        // onResume 时窗口还没画出来（uidState=RCVR），会被判成后台启动而拒绝。
+        ui.postDelayed(new Runnable() {
+            @Override
+            public void run() { startWorkers(); }
+        }, 1500L);
         if (swOn != null) swOn.setChecked(sp.getBoolean("enabled", true));
         if (swNames != null) swNames.setChecked(sp.getBoolean("skipNames", true));
         startStatReceiver();
@@ -427,7 +571,7 @@ public class Settings extends Activity {
                            .append("echo \"P ").append(p).append(" $(grep '^probe=' /data/user/0/")
                            .append(p).append("/files/fdtrans-probe.txt 2>/dev/null | cut -c7-)\"; ");
                     }
-                    String res = cmd.length() == 0 ? "" : Scope.su(cmd.toString());
+                    String res = cmd.length() == 0 ? "" : Scope.suMM(cmd.toString());
                     java.util.Map<String, Integer> cnt = new java.util.HashMap<String, Integer>();
                     java.util.Map<String, String> probe = new java.util.HashMap<String, String>();
                     for (String line : res.split("\n")) {

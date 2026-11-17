@@ -76,9 +76,17 @@ public class Bridge extends Service {
              .setContentText("为没有联网权限的应用提供翻译，点开可停止")
              .setContentIntent(pi)
              .setOngoing(true);
-            startForeground(1, b.build());
+            Notification n = b.build();
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(1, n, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+            } else {
+                startForeground(1, n);
+            }
+            Log.i(TAG, "bridge fg ok sdk=" + Build.VERSION.SDK_INT);
         } catch (Throwable t) {
             Log.w(TAG, "foreground err " + t);
+            try { startForeground(1, new Notification.Builder(this, CH).setSmallIcon(android.R.drawable.ic_menu_edit).setContentTitle("实时翻译后台").build()); }
+            catch (Throwable t2) { Log.w(TAG, "foreground fallback err " + t2); }
         }
     }
 
@@ -107,13 +115,25 @@ public class Bridge extends Service {
                     Log.i(TAG, "bridge scope: " + (pkgs == null ? "null" : pkgs.size() + ""));
                 }
                 ticks++;
+                checkPreloadTrigger();
                 if (pkgs != null && ticks % 10 == 0) Log.i(TAG, "bridge tick " + ticks + " running=" + running);
-                if (pkgs != null) {
+
+                // 发烫时不做任何网络与解析工作，只留着循环空转等降温
+                boolean hot = Thermal.hot(loopCtx);
+                if (hot && ticks % 5 == 0) Log.i(TAG, "bridge thermal hold soc=" + Thermal.socTempC() + "C");
+                boolean busy = false;
+                if (pkgs != null && !hot) {
                     for (String pkg : pkgs) {
-                        try { pumpOne(pkg); } catch (Throwable t) { Log.w(TAG, "bridge " + pkg + " err " + t); }
+                        try {
+                            if (pumpOne(pkg) > 0) busy = true;
+                        } catch (Throwable t) {
+                            Log.w(TAG, "bridge " + pkg + " err " + t);
+                        }
                     }
                 }
-                Thread.sleep(1500L);
+                // 有活干就快转，没事就慢转：原来固定 1500ms，10 个作用域包一轮就是纯耗电
+                long gap = hot ? 5000L : (busy ? 800L : 2500L);
+                Thread.sleep(gap);
             } catch (Throwable t) {
                 Log.w(TAG, "bridge loop err " + t);
                 try { Thread.sleep(3000L); } catch (Throwable ignore) { }
@@ -123,21 +143,84 @@ public class Bridge extends Service {
 
     /** 读一个目标应用的请求文件，翻完写回结果文件。 */
     private static int ticks;
+    private static long lastProbeAt;
 
-    private static void pumpOne(String pkg) throws Exception {
+    /** 外部触发：往模块自己的 files 目录写 preload-now.txt（内容=包名）即可启动一次预翻。 */
+    private static void checkPreloadTrigger() {
+        try {
+            if (loopCtx == null) return;
+            // 一键体检：跑完把报告写到 files 目录，便于外部读取/排障
+            java.io.File chk = new java.io.File(loopCtx.getFilesDir(), "checkup-now.txt");
+            if (chk.exists()) {
+                chk.delete();
+                java.util.Set<String> sc = Scope.read(loopCtx);
+                String rep = Checkup.run(loopCtx, sc == null ? new java.util.LinkedHashSet<String>() : sc);
+                try {
+                    java.io.FileOutputStream fo = new java.io.FileOutputStream(
+                            new java.io.File(loopCtx.getFilesDir(), "checkup-report.txt"));
+                    fo.write(rep.getBytes("UTF-8"));
+                    fo.close();
+                } catch (Throwable t) { Log.w(TAG, "checkup write err " + t); }
+                Log.i(TAG, "checkup report written");
+            }
+            // 全部作用域应用排队预翻
+            java.io.File all = new java.io.File(loopCtx.getFilesDir(), "preload-all-now.txt");
+            if (all.exists()) {
+                all.delete();
+                java.util.Set<String> sc2 = Scope.read(loopCtx);
+                if (sc2 != null && !sc2.isEmpty()) {
+                    Log.i(TAG, "external preload-all: " + sc2.size());
+                    Preload.enqueue(loopCtx, sc2);
+                }
+            }
+
+            java.io.File f = new java.io.File(loopCtx.getFilesDir(), "preload-now.txt");
+            if (!f.exists()) return;
+            String body = readSmall(f);
+            f.delete();
+            if (body == null) return;
+            String pkg = body.trim();
+            int nl = pkg.indexOf('\n');
+            if (nl > 0) pkg = pkg.substring(0, nl).trim();
+            Log.i(TAG, "external preload trigger: [" + pkg + "]");
+            if (pkg.length() > 0) Preload.start(loopCtx, pkg);
+        } catch (Throwable t) {
+            Log.w(TAG, "preload trigger err " + t);
+        }
+    }
+
+    private static String readSmall(java.io.File f) {
+        java.io.InputStream in = null;
+        try {
+            in = new java.io.FileInputStream(f);
+            byte[] buf = new byte[256];
+            int n = in.read(buf);
+            if (n <= 0) return null;
+            return new String(buf, 0, n, "UTF-8");
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            try { if (in != null) in.close(); } catch (Throwable ignore) { }
+        }
+    }
+
+    private static int pumpOne(String pkg) throws Exception {
         String base = "/data/user/0/" + pkg + "/files";
         String req = base + "/fdtrans-req.tsv";
         String res = base + "/fdtrans-res.tsv";
-        if (ticks % 10 == 1) {
+        boolean probe = false;
+        long now = System.currentTimeMillis();
+        if (now - lastProbeAt > 30000L) { lastProbeAt = now; probe = true; }
+        if (probe) {
             Log.i(TAG, "bridge probe id=" + Scope.suMM("id") + " ls=" + Scope.suMM("ls /data/user/0 | wc -l"));
         }
         String out = Scope.suMM("if [ -s " + req + " ]; then cat " + req + "; fi");
-        if (ticks % 10 == 1) {
+        if (probe) {
             String head = out == null ? "null" : out.substring(0, Math.min(50, out.length()));
             Log.i(TAG, "bridge probe req=[" + head + "]");
         }
-        if (out == null || out.startsWith("ERR ")) { Log.w(TAG, "bridge " + pkg + " su err: " + out); return; }
-        if (out.trim().length() == 0) return;
+        if (out == null || out.startsWith("ERR ")) { Log.w(TAG, "bridge " + pkg + " su err: " + out); return 0; }
+        if (out.trim().length() == 0) return 0;
         Log.i(TAG, "bridge " + pkg + " req bytes=" + out.length());
 
         java.util.List<String> srcs = new ArrayList<String>();
@@ -149,7 +232,7 @@ public class Bridge extends Service {
             if (!srcs.contains(src)) srcs.add(src);
             if (srcs.size() >= 60) break;
         }
-        if (srcs.isEmpty()) { clearReq(pkg, base, req); return; }
+        if (srcs.isEmpty()) { clearReq(pkg, base, req); return 0; }
 
         int wrote = 0;
         java.util.List<String> chunk = new ArrayList<String>();
@@ -175,6 +258,7 @@ public class Bridge extends Service {
         } else {
             Log.w(TAG, "bridge " + pkg + " all failed, keep req for retry");
         }
+        return wrote;
     }
 
     private static Context appCtxCache;

@@ -280,7 +280,7 @@ public final class Translator {
             synchronized (Translator.class) {
                 p = pool;
                 if (p == null) {
-                    p = new ThreadPoolExecutor(3, 3, 30, TimeUnit.SECONDS,
+                    p = new ThreadPoolExecutor(2, 2, 30, TimeUnit.SECONDS,
                             new LinkedBlockingQueue<Runnable>(4096));
                     p.allowCoreThreadTimeOut(false);
                     pool = p;
