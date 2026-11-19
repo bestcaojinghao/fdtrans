@@ -131,6 +131,22 @@ public class Settings extends Activity {
             }
         });
         card1.addView(swDbg, lp(10));
+
+        Switch swThermal = new Switch(this);
+        swThermal.setText("发烫时暂停翻译（建议开）");
+        swThermal.setTextSize(15);
+        swThermal.setTextColor(0xFFEEEEEE);
+        swThermal.setChecked(sp.getBoolean("thermalGate", true));
+        swThermal.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(android.widget.CompoundButton btn, boolean v) {
+                sp.edit().putBoolean("thermalGate", v).apply();
+                Thermal.setEnabled(v);
+                toast(v ? "CPU 结温 ≥52°C 或电池 ≥41°C 时自动暂停后台翻译"
+                        : "已关闭温控闸门，发烫也会继续翻译");
+            }
+        });
+        card1.addView(swThermal, lp(10));
         card1.addView(text("开关会推给所有已加入的应用；没在运行的下次打开时沿用上次保存的值。",
                 12, 0xFF7E7E7E), lp(12));
         root.addView(card1, lp(20));
@@ -163,8 +179,11 @@ public class Settings extends Activity {
                 startActivity(i);
             }
         });
+        list.setVerticalScrollBarEnabled(false);
+        list.setNestedScrollingEnabled(false);
+        fitList();
         card2.addView(list, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(200)));
+                ViewGroup.LayoutParams.MATCH_PARENT, listHeight()));
 
         noteText = text("读取中…", 12, 0xFF9E9E9E);
         card2.addView(noteText, lp(8));
@@ -221,7 +240,24 @@ public class Settings extends Activity {
             }
         });
         card3.addView(rg, lp(6));
-        card3.addView(text("换引擎后要重开目标应用才生效（翻译在目标应用的进程里跑）。",
+
+        Switch swPar = new Switch(this);
+        swPar.setText("并行翻译（多引擎同时跑，更快）");
+        swPar.setTextSize(15);
+        swPar.setTextColor(0xFFEEEEEE);
+        swPar.setChecked(sp.getBoolean("parallel", true));
+        swPar.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(android.widget.CompoundButton btn, boolean v) {
+                sp.edit().putBoolean("parallel", v).apply();
+                Config.setParallel(v);
+                Push.bool(Settings.this, scoped, "parallel", v);
+                toast(v ? "并行已开：Bing / 腾讯 / 有道 / MyMemory 同时翻" : "并行已关：只用 Bing 顺序翻");
+            }
+        });
+        card3.addView(swPar, lp(10));
+        card3.addView(text("并行时会把一批文字拆给几家引擎同时翻，谁先回来用谁的；"
+                + "某家挂了自动换下一家。换引擎后要重开目标应用才生效。",
                 12, 0xFF7E7E7E), lp(8));
         root.addView(card3, lp(18));
 
@@ -261,6 +297,71 @@ public class Settings extends Activity {
         card4.addView(text("后台代翻 = 由本模块（有联网权限）替目标应用翻译。"
                 + "目标应用自己没有网络（缺 INTERNET 权限、或冷启动后台进程被系统限制）时用它。",
                 12, 0xFF7E7E7E), lp(8));
+        Button bulk = btn("导出当前应用的英文清单（.tsv）", 0xFF2E4A44);
+        bulk.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (scoped.isEmpty()) { toast("还没有加入任何应用"); return; }
+                final String[] pkgs = scoped.toArray(new String[0]);
+                toast("正在导出 " + pkgs.length + " 个应用的英文清单…");
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        final StringBuilder sb = new StringBuilder();
+                        int total = 0;
+                        for (String p : pkgs) {
+                            Object[] r = Bulk.export(Settings.this, p);
+                            if (r == null) { sb.append(p).append("：失败\n"); continue; }
+                            total += (Integer) r[0];
+                            sb.append(p).append("：").append(r[0]).append(" 条（已缓存 ")
+                              .append(r[1]).append("）\n");
+                        }
+                        final int tot = total;
+                        ui.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                showReport("已导出到 " + Bulk.DIR + "\n合计 " + tot + " 条\n\n"
+                                        + sb + "\n把 .src.tsv 批量翻成「原文\\t译文」的 .res.tsv，"
+                                        + "同目录放好后点「导入译文」。");
+                            }
+                        });
+                    }
+                }, "fdtrans-bulk").start();
+            }
+        });
+        card4.addView(bulk, lp(10));
+        Button bulkIn = btn("导入译文（.tsv）", 0xFF2E4A44);
+        bulkIn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                final String[] pkgs = scoped.toArray(new String[0]);
+                toast("正在导入…");
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        final StringBuilder sb = new StringBuilder();
+                        for (String p : pkgs) {
+                            int[] r = Bulk.importRes(Settings.this, p);
+                            if (r == null) continue;
+                            sb.append(p).append("：写入 ").append(r[0]).append(" 条\n");
+                        }
+                        ui.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                showReport(sb.length() == 0
+                                        ? ("没找到 .res.tsv，放在 " + Bulk.DIR + "/<包名>.res.tsv")
+                                        : ("导入完成\n\n" + sb));
+                                reload();
+                            }
+                        });
+                    }
+                }, "fdtrans-bulk").start();
+            }
+        });
+        card4.addView(bulkIn, lp(10));
+        card4.addView(text("导出 = 把安装包里所有英文抽成一个文件，随便用什么批量翻（大模型/网页/脚本都行）；"
+                + "翻完按「原文\\t译文」一行一条存成 <包名>.res.tsv 再导入。"
+                + "目录：" + Bulk.DIR, 12, 0xFF7E7E7E), lp(8));
         Button clearAll = btn("清空全部应用的译文缓存", 0xFF303030);
         clearAll.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -497,6 +598,7 @@ public class Settings extends Activity {
             }
         }
         if (adapter != null) adapter.notifyDataSetChanged();
+        fitList();
         if (liveBar != null) {
             if (anyActive) {
                 liveBar.setVisibility(View.VISIBLE);
@@ -590,6 +692,7 @@ public class Settings extends Activity {
                         rows.addAll(out);
                         for (Row r : rows) r.icon = iconOf(r.pkg);
                         adapter.notifyDataSetChanged();
+                        fitList();
                         countText.setText(rows.isEmpty() ? "（空）" : rows.size() + " 个");
                         if (s == null) {
                             noteText.setText("读不到 LSPosed 配置（root 没授权？）。"
@@ -690,6 +793,26 @@ public class Settings extends Activity {
 
     private void toast(String s) {
         Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
+    }
+
+
+    /** 列表按行数撑满，交给外层 ScrollView 统一滚动——否则内嵌 ListView 只露前几行且滑不动。 */
+    private int listHeight() {
+        int n = Math.max(1, rows.size());
+        return dp(56) * n + dp(4);
+    }
+
+    private void fitList() {
+        if (list == null) return;
+        ViewGroup.LayoutParams p = list.getLayoutParams();
+        int h = listHeight();
+        if (p == null) {
+            list.setLayoutParams(new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, h));
+        } else if (p.height != h) {
+            p.height = h;
+            list.setLayoutParams(p);
+        }
     }
 
     private class Adapter extends BaseAdapter {

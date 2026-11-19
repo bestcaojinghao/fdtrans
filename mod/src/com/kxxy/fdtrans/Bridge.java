@@ -117,12 +117,23 @@ public class Bridge extends Service {
                 ticks++;
                 checkPreloadTrigger();
                 if (pkgs != null && ticks % 10 == 0) Log.i(TAG, "bridge tick " + ticks + " running=" + running);
-                if (pkgs != null) {
+
+                // 发烫时不做任何网络与解析工作，只留着循环空转等降温
+                boolean hot = Thermal.hot(loopCtx);
+                if (hot && ticks % 5 == 0) Log.i(TAG, "bridge thermal hold soc=" + Thermal.socTempC() + "C");
+                boolean busy = false;
+                if (pkgs != null && !hot) {
                     for (String pkg : pkgs) {
-                        try { pumpOne(pkg); } catch (Throwable t) { Log.w(TAG, "bridge " + pkg + " err " + t); }
+                        try {
+                            if (pumpOne(pkg) > 0) busy = true;
+                        } catch (Throwable t) {
+                            Log.w(TAG, "bridge " + pkg + " err " + t);
+                        }
                     }
                 }
-                Thread.sleep(1500L);
+                // 有活干就快转，没事就慢转：原来固定 1500ms，10 个作用域包一轮就是纯耗电
+                long gap = hot ? 5000L : (busy ? 800L : 2500L);
+                Thread.sleep(gap);
             } catch (Throwable t) {
                 Log.w(TAG, "bridge loop err " + t);
                 try { Thread.sleep(3000L); } catch (Throwable ignore) { }
@@ -163,6 +174,34 @@ public class Bridge extends Service {
                 }
             }
 
+            // 批量导出/导入（外部脚本可驱动）
+            java.io.File be = new java.io.File(loopCtx.getFilesDir(), "bulk-export-now.txt");
+            if (be.exists()) {
+                String body = readSmall(be);
+                be.delete();
+                if (body != null) {
+                    for (String p : body.trim().split("\\s+")) {
+                        if (p.length() == 0) continue;
+                        Object[] r = Bulk.export(loopCtx, p);
+                        Log.i(TAG, "external bulk export [" + p + "] -> "
+                                + (r == null ? "failed" : (r[0] + " lines")));
+                    }
+                }
+            }
+            java.io.File bi = new java.io.File(loopCtx.getFilesDir(), "bulk-import-now.txt");
+            if (bi.exists()) {
+                String body = readSmall(bi);
+                bi.delete();
+                if (body != null) {
+                    for (String p : body.trim().split("\\s+")) {
+                        if (p.length() == 0) continue;
+                        int[] r = Bulk.importRes(loopCtx, p);
+                        Log.i(TAG, "external bulk import [" + p + "] -> "
+                                + (r == null ? "no res file" : (r[0] + "/" + r[1])));
+                    }
+                }
+            }
+
             java.io.File f = new java.io.File(loopCtx.getFilesDir(), "preload-now.txt");
             if (!f.exists()) return;
             String body = readSmall(f);
@@ -193,7 +232,7 @@ public class Bridge extends Service {
         }
     }
 
-    private static void pumpOne(String pkg) throws Exception {
+    private static int pumpOne(String pkg) throws Exception {
         String base = "/data/user/0/" + pkg + "/files";
         String req = base + "/fdtrans-req.tsv";
         String res = base + "/fdtrans-res.tsv";
@@ -208,8 +247,8 @@ public class Bridge extends Service {
             String head = out == null ? "null" : out.substring(0, Math.min(50, out.length()));
             Log.i(TAG, "bridge probe req=[" + head + "]");
         }
-        if (out == null || out.startsWith("ERR ")) { Log.w(TAG, "bridge " + pkg + " su err: " + out); return; }
-        if (out.trim().length() == 0) return;
+        if (out == null || out.startsWith("ERR ")) { Log.w(TAG, "bridge " + pkg + " su err: " + out); return 0; }
+        if (out.trim().length() == 0) return 0;
         Log.i(TAG, "bridge " + pkg + " req bytes=" + out.length());
 
         java.util.List<String> srcs = new ArrayList<String>();
@@ -219,15 +258,15 @@ public class Bridge extends Service {
             if (src.length() == 0) continue;
             if (Translator.get(src) != null) continue;
             if (!srcs.contains(src)) srcs.add(src);
-            if (srcs.size() >= 60) break;
+            if (srcs.size() >= 200) break;
         }
-        if (srcs.isEmpty()) { clearReq(pkg, base, req); return; }
+        if (srcs.isEmpty()) { clearReq(pkg, base, req); return 0; }
 
         int wrote = 0;
         java.util.List<String> chunk = new ArrayList<String>();
         int chunkLen = 0;
         for (String one : srcs) {
-            if (!chunk.isEmpty() && (chunkLen + one.length() > 1200 || chunk.size() >= 12)) {
+            if (!chunk.isEmpty() && (chunkLen + one.length() > 6000 || chunk.size() >= 240)) {
                 wrote += flushChunk(pkg, base, res, chunk);
                 chunk = new ArrayList<String>();
                 chunkLen = 0;
@@ -247,6 +286,7 @@ public class Bridge extends Service {
         } else {
             Log.w(TAG, "bridge " + pkg + " all failed, keep req for retry");
         }
+        return wrote;
     }
 
     private static Context appCtxCache;

@@ -405,6 +405,7 @@ public class Main implements IXposedHookLoadPackage {
             Config.setClearCacheAt(sp.getLong("clearCacheAt", 0L));
             Config.setSkipNames(sp.getBoolean("skipNames", true));
             Config.setDebug(sp.getBoolean("debug", false));
+            Config.setParallel(sp.getBoolean("parallel", true));
             String eng = sp.getString("engine", "bing");
             if ("mymemory".equals(eng) && !sp.getBoolean("engineMigrated", false)) {
                 eng = "bing";   // 老版本默认是 mymemory，迁移到 bing
@@ -440,6 +441,11 @@ public class Main implements IXposedHookLoadPackage {
                             boolean v = i.getBooleanExtra("debug", false);
                             Config.setDebug(v);
                             e.putBoolean("debug", v);
+                        }
+                        if (i.hasExtra("parallel")) {
+                            boolean v = i.getBooleanExtra("parallel", true);
+                            Config.setParallel(v);
+                            e.putBoolean("parallel", v);
                         }
                         if (i.hasExtra("skipNames")) {
                             boolean v = i.getBooleanExtra("skipNames", true);

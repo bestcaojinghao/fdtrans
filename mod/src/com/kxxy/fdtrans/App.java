@@ -17,6 +17,7 @@ public class App extends Application {
         try { Preload.resume(this); } catch (Throwable t) { Log.w(TAG, "resume err " + t); }
         try {
             android.content.SharedPreferences sp = getSharedPreferences("fdtrans", MODE_PRIVATE);
+            Thermal.setEnabled(sp.getBoolean("thermalGate", true));
             if (!sp.getBoolean("bridgeAuto", true)) return;
             // 只在这里起循环线程；服务由前台界面（Settings.onResume）启动。
             // 后台进程直接 startForegroundService 会被系统拒绝（Background start not allowed），

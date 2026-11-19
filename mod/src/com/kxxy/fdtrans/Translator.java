@@ -280,7 +280,7 @@ public final class Translator {
             synchronized (Translator.class) {
                 p = pool;
                 if (p == null) {
-                    p = new ThreadPoolExecutor(3, 3, 30, TimeUnit.SECONDS,
+                    p = new ThreadPoolExecutor(8, 8, 30, TimeUnit.SECONDS,
                             new LinkedBlockingQueue<Runnable>(4096));
                     p.allowCoreThreadTimeOut(false);
                     pool = p;
@@ -485,7 +485,7 @@ public final class Translator {
      * 批量翻译：把多条短文用 ||| 拼成一次请求（Bing 单次可吃 4000 字符），
      * 返回与入参一一对应的译文；分段数不匹配时返回 null（调用方回退逐条翻）。
      */
-    public static String[] translateBatch(java.util.List<String> items) {
+    static String[] callBingBatch(java.util.List<String> items) {
         if (items == null || items.isEmpty()) return null;
         StringBuilder sb = new StringBuilder(4096);
         for (int i = 0; i < items.size(); i++) {
@@ -501,6 +501,154 @@ public final class Translator {
             return null;
         }
         return parts;
+    }
+
+    /**
+     * 批量翻译入口。
+     * 并行模式：把一批拆成若干组，分别丢给 bing / tencent / youdao / mymemory 同时翻，
+     * 谁先返回算谁的；有组失败就整批回退 bing，再不行逐条 mymemory。
+     * 串行模式：老路径（只用 bing），用于排查问题时对照。
+     */
+    public static String[] translateBatch(java.util.List<String> items) {
+        if (items == null || items.isEmpty()) return null;
+        Engines.E[] engines = Engines.ALL;
+        if (!Config.parallel() || items.size() < 6 || engines.length < 2) {
+            return callBingBatch(items);
+        }
+
+        // 每组 ~120 条：一次请求塞满，组数按需扩到 8，配合 8 线程并发
+        // 按「字符总量 / 3000」和「条数 / 20」估算组数，最多 8 组；
+        // 长句多的时候必须按字符切，否则单个请求被撑爆（腾讯会整批失败）。
+        int totalChars = 0;
+        for (String it : items) totalChars += it.length() + 4;
+        // 组数：条数/12 与 字符/3000 取大，最多 8 组——短句也要摊满 8 条链路，
+        // 否则一批 240 条会退化成 2 个请求互相等
+        int groups = Math.min(6, Math.max(2, Math.max((totalChars + 2999) / 3000,
+                                                      (items.size() + 11) / 12)));
+        groups = Math.min(groups, items.size());
+        if (groups < 2) return callBingBatch(items);
+        final String[] out = new String[items.size()];
+        final int target = Math.max(1, totalChars / groups);
+
+        // 贪心均分：每组装到接近 target 字符就切
+        final int[] bounds = new int[groups + 1];
+        bounds[groups] = items.size();
+        int acc = 0, g2 = 0;
+        for (int i = 0; i < items.size() && g2 < groups - 1; i++) {
+            acc += items.get(i).length() + 4;
+            if (acc >= target) {
+                bounds[++g2] = i + 1;
+                acc = 0;
+            }
+        }
+        while (g2 < groups - 1) bounds[++g2] = items.size();
+        final java.util.concurrent.CountDownLatch latch =
+                new java.util.concurrent.CountDownLatch(groups);
+
+        for (int g = 0; g < groups; g++) {
+            final int from = bounds[g];
+            final int to = bounds[g + 1];
+            if (from >= to) { latch.countDown(); continue; }
+            final int start = g % engines.length;   // 组号轮转起点，几条链路分摊负载
+            pool().execute(new Runnable() {
+                @Override
+                public void run() {
+                    java.util.List<String> sub = items.subList(from, to);
+                    // 两轮：TLS 偶发 Chain validation failed / 限流都会让单次失败，
+                    // 第一轮走完还缺的再补一轮（换引擎起点，别死磕同一个）
+                    for (int pass = 0; pass < 2; pass++) {
+                      if (pass > 0 && filled(out, from, to)) break;
+                      if (pass > 0) { try { Thread.sleep(400L); } catch (InterruptedException ie) { } }
+                      for (int k = 0; k < Engines.ALL.length; k++) {
+                        Engines.E e = Engines.ALL[(start + k) % Engines.ALL.length];
+                        if (!usable(e)) continue;
+                        // youdao/mymemory 只能逐条：一组 40 条＝40 个串行请求，会拖死整批
+                        if (!batchCapable(e) && sub.size() > 6) continue;
+                        // Bing 用 ||| 拼批，条数一多分隔符会被翻掉（实测 120 条返回 123 段），>60 条交给腾讯
+                        if ("bing".equals(e.name()) && sub.size() > 60) continue;
+                        try {
+                            String[] got = e.translate(new ArrayList<String>(sub));
+                            noteEngine(e.name(), got != null && got.length == sub.size());
+                            if (got != null && got.length == sub.size()) {
+                                for (int i = 0; i < got.length; i++) {
+                                    if (got[i] != null && got[i].length() > 0) out[from + i] = got[i];
+                                }
+                                if (filled(out, from, to)) break;
+                            }
+                        } catch (Throwable t) {
+                            noteNet(t);
+                            Log.w(TAG, "engine " + e.name() + " err " + t);
+                        }
+                      }
+                    }
+                    latch.countDown();
+                }
+            });
+        }
+        try {
+            latch.await(90, TimeUnit.SECONDS);
+        } catch (InterruptedException ignore) {
+            Thread.currentThread().interrupt();
+        }
+        if (filled(out, 0, out.length)) return out;
+
+        // 兜底 1：整批再走一次 bing
+        String[] bing = callBingBatch(items);
+        if (bing != null) {
+            for (int i = 0; i < bing.length && i < out.length; i++) {
+                if (out[i] == null || out[i].length() == 0) out[i] = bing[i];
+            }
+        }
+        // 兜底 2：还没填上的逐条 mymemory
+        for (int i = 0; i < out.length; i++) {
+            if (out[i] == null || out[i].length() == 0) out[i] = callMyMemory(items.get(i));
+        }
+        return filled(out, 0, out.length) ? out : null;
+    }
+
+    private static boolean filled(String[] a, int from, int to) {
+        for (int i = from; i < to; i++) {
+            if (a[i] == null || a[i].length() == 0) return false;
+        }
+        return true;
+    }
+
+    /** 引擎可用性：没网时全停，bing 需要 token 但会自己取。 */
+    private static final java.util.Map<String, long[]> ENG_FAIL = new java.util.concurrent.ConcurrentHashMap<String, long[]>();
+
+    /** 记一次引擎结果：连续失败 3 次冷却 120s（429/限流时会一路 429，必须掐断）。 */
+    static void noteEngine(String name, boolean ok) {
+        long[] st = ENG_FAIL.get(name);
+        if (st == null) { st = new long[]{0, 0}; ENG_FAIL.put(name, st); }
+        synchronized (st) {
+            if (ok) { st[0] = 0; st[1] = 0; return; }
+            st[0]++;
+            if (st[0] >= 3) {
+                st[1] = System.currentTimeMillis() + 120000L;
+                st[0] = 0;
+                Log.w(TAG, "engine " + name + " cooling down 120s");
+            }
+        }
+    }
+
+    /**
+     * youdao / mymemory 只能逐条调，一组 40 条就是 40 个串行请求（youdao 单条约 2.7s），
+     * 会把整批卡在 CountDownLatch 上。批量分组只用支持 list 的引擎（bing / tencent）。
+     */
+    private static boolean batchCapable(Engines.E e) {
+        String n = e.name();
+        return "bing".equals(n) || "tencent".equals(n);
+    }
+
+    private static boolean usable(Engines.E e) {
+        long[] st = ENG_FAIL.get(e.name());
+        if (st != null) {
+            synchronized (st) {
+                if (st[1] > System.currentTimeMillis()) return false;
+            }
+        }
+        if (!canNet()) return false;
+        return true;
     }
 
     /** 同步翻译（预热用，不经过线程池）。 */
@@ -526,7 +674,7 @@ public final class Translator {
         }
     }
 
-    private static String callMyMemory(String text) {
+    static String callMyMemory(String text) {
         HttpURLConnection c = null;
         try {
             String u = String.format(API, URLEncoder.encode(text, "UTF-8"));

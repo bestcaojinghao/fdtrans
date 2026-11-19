@@ -160,7 +160,7 @@ public final class Preload {
     }
 
     private static void work(Context ctx, String pkg) throws Exception {
-        List<String> cand = ApkText.extract(ctx, pkg);
+        List<String> cand = ApkText.extract(ctx, pkg, uiOnlyPref(ctx));
         android.util.Log.i("FDTrans", "preload " + pkg + " candidates=" + cand.size());
         if (cand.isEmpty()) {
             phase = "没在安装包里找到可翻的英文";
@@ -190,7 +190,7 @@ public final class Preload {
             batch.add(s);
             chars += s.length() + 6;
             inBatch++;
-            if (chars >= 1200 || inBatch >= 12) {
+            if (chars >= 6000 || inBatch >= 240) {
                 String[] got = Translator.translateBatch(batch);
                 if (got == null && batch.size() > 1) got = Translator.translateBatch(batch); // 一次重试
                 if (got != null) {
@@ -221,6 +221,8 @@ public final class Preload {
                     flush(pkg, out.toString(), uid);
                     out.setLength(0);
                 }
+                // 每批之间让出 CPU；发烫时在这里挂起，降温后自动继续
+                Thermal.pace(ctx, 200L);
                 cast(ctx, pkg);
             }
         }
@@ -278,4 +280,13 @@ public final class Preload {
             android.util.Log.i("FDTrans", "preload flushed " + pkg + " " + payload.length() + " bytes");
         }
     }
+    /** 预翻是否包含 dex 里的长句：默认不（多半是异常/日志，翻了也用不上）。 */
+    static boolean uiOnlyPref(android.content.Context ctx) {
+        try {
+            return prefs(ctx).getBoolean("uiOnly", true);
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
 }

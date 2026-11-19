@@ -23,6 +23,8 @@ public final class Config {
     private static volatile boolean skipNames = true;
     /** 诊断日志：被规则挡下的文本 / 扫描到的 Compose 类名 */
     private static volatile boolean debug;
+    /** 并行翻译：多引擎同时跑（默认开）。关掉只走 Bing，便于对照排查 */
+    private static volatile boolean parallel = true;
 
     private Config() {}
 
@@ -32,6 +34,14 @@ public final class Config {
 
     public static void setDebug(boolean v) {
         debug = v;
+    }
+
+    public static boolean parallel() {
+        return parallel;
+    }
+
+    public static void setParallel(boolean v) {
+        parallel = v;
     }
 
     public static boolean enabled() {

@@ -57,6 +57,14 @@ public final class ApkText {
 
     /** 从安装包里提取候选英文串（去重、过滤掉代码符号/纯数字/中文）。 */
     public static List<String> extract(Context ctx, String pkg) {
+        return extract(ctx, pkg, false);
+    }
+
+    /**
+     * uiOnly=true 只取 resources.arsc（界面文案）——dex 里的长句多是异常/日志，
+     * 翻它们既浪费配额又永远显示不到界面上。
+     */
+    public static List<String> extract(Context ctx, String pkg, boolean uiOnly) {
         Set<String> out = new LinkedHashSet<String>();
         List<File> apks = copyApks(ctx, pkg);
         for (File f : apks) {
@@ -70,8 +78,12 @@ public final class ApkText {
                         byte[] b = null;
                         if ("resources.arsc".equals(n)) {
                             b = readAll(zf.getInputStream(e));
-                            arscStrings(b, out);
-                        } else if (n.startsWith("classes") && n.endsWith(".dex")) {
+                            // 默认语言（values/ 而不是 values-de/）才是英文原文；
+                            // 整个字符串池包含几十种语言，翻它们是纯浪费
+                            int before = out.size();
+                            arscDefaultStrings(b, out);
+                            if (out.size() - before < 5) arscStrings(b, out);
+                        } else if (!uiOnly && n.startsWith("classes") && n.endsWith(".dex")) {
                             b = readAll(zf.getInputStream(e));
                             dexStrings(b, out);
                         }
@@ -246,6 +258,102 @@ public final class ApkText {
     }
 
     // ---------------- 小工具 ----------------
+
+
+    /**
+     * 只取「默认配置」（无 locale）的条目：遍历 ResTable_package -> ResTable_type，
+     * 用 ResTable_config 的 language/country 是否为 0 判断，再把 Res_value 的字符串引用
+     * 映射回全局字符串池。整个池子里有几十种语言，这里只留英文原文。
+     */
+    private static void arscDefaultStrings(byte[] d, Set<String> out) {
+        int n = d.length;
+        if (n < 12 || u16(d, 0) != 0x0002) return;
+        int hdr = u16(d, 2);
+        if (hdr + 12 > n) return;
+        int pool = hdr;
+        if (u16(d, pool) != 0x0001) return;
+        int scount = u32(d, pool + 8);
+        int sflags = u32(d, pool + 16);
+        int sstart = u32(d, pool + 20);
+        int shdr = u16(d, pool + 2);
+        boolean utf8 = (sflags & 0x100) != 0;
+        if (scount <= 0 || pool + shdr + scount * 4 > n) return;
+
+        int off = hdr;
+        while (off + 8 <= n) {
+            int t = u16(d, off), hs = u16(d, off + 2), sz = u32(d, off + 4);
+            if (sz < 8 || off + sz > n) break;
+            if (t == 0x0200) {                       // ResTable_package
+                int p = off + hs;
+                while (p + 8 <= off + sz) {
+                    int t2 = u16(d, p), hs2 = u16(d, p + 2), sz2 = u32(d, p + 4);
+                    if (sz2 < 8 || p + sz2 > off + sz) break;
+                    if (t2 == 0x0201) {              // ResTable_type
+                        int cfg = p + 20;
+                        if (cfg + 12 <= n && d[cfg + 8] == 0 && d[cfg + 9] == 0) {
+                            int ecnt = u32(d, p + 12);
+                            int estart = u32(d, p + 16);
+                            boolean sparse = (d[p + 9] & 0x01) != 0;
+                            for (int i = 0; i < ecnt; i++) {
+                                int eo;
+                                if (sparse) {
+                                    int at = p + hs2 + i * 4;
+                                    if (at + 4 > n) break;
+                                    eo = u16(d, at + 2) * 4;
+                                    if (eo == 0xffff * 4) continue;
+                                } else {
+                                    int at = p + hs2 + i * 4;
+                                    if (at + 4 > n) break;
+                                    eo = u32(d, at);
+                                    if (eo == -1) continue;
+                                }
+                                int ev = p + estart + eo;
+                                if (ev < 0 || ev + 8 > n) continue;
+                                int rv = ev + u16(d, ev);
+                                if (rv + 8 > n) continue;
+                                if (d[rv + 3] != 0x03) continue;   // TYPE_STRING
+                                int si = u32(d, rv + 4);
+                                if (si < 0 || si >= scount) continue;
+                                int so = pool + sstart + u32(d, pool + shdr + si * 4);
+                                String v = poolStr(d, so, utf8);
+                                if (v != null) add(v, out);
+                            }
+                        }
+                    }
+                    p += sz2;
+                }
+            }
+            off += sz;
+        }
+    }
+
+    /** 从字符串池的某条偏移读一个字符串（UTF-8 或 UTF-16）。 */
+    private static String poolStr(byte[] d, int o, boolean utf8) {
+        try {
+            int n = d.length;
+            if (o < 0 || o >= n) return null;
+            if (utf8) {
+                int b = d[o] & 0xff;
+                o += (b & 0x80) != 0 ? 2 : 1;             // utf16 长度前缀
+                int b2 = d[o] & 0xff;
+                int len;
+                if ((b2 & 0x80) != 0) { len = ((b2 & 0x7f) << 8) | (d[o + 1] & 0xff); o += 2; }
+                else { len = b2; o += 1; }
+                if (len <= 0 || o + len > n) return null;
+                return new String(d, o, len, "UTF-8");
+            }
+            int len = u16(d, o);
+            o += 2;
+            if ((len & 0x8000) != 0) {
+                len = ((len & 0x7fff) << 16) | u16(d, o);
+                o += 2;
+            }
+            if (len <= 0 || o + len * 2 > n) return null;
+            return new String(d, o, len * 2, "UTF-16LE");
+        } catch (Throwable t) {
+            return null;
+        }
+    }
 
     private static int u16(byte[] d, int o) {
         return (d[o] & 0xff) | ((d[o + 1] & 0xff) << 8);
