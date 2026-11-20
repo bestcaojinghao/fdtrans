@@ -571,6 +571,43 @@ public class Main implements IXposedHookLoadPackage {
      * 界面上任何来自 resources.arsc 的文案都会在这里经过一次翻译。
      * 带 % 的格式串一律放过，避免参数格式化崩溃。
      */
+    /**
+     * 资源通路的准入判断。这里的每一道闸都是被真实崩溃打出来的：
+     * ShizuStore 把 getString(app_name) 拼进 HTTP User-Agent，译文里的全角括号
+     * （U+FF08）让 OkHttp 抛 IllegalArgumentException: Unexpected char 0xff08，
+     * 后台线程异常直接把应用带走（表现为"翻译完打不开"）。
+     */
+    private static boolean resSafe(Object res, XC_MethodHook.MethodHookParam param, String src) {
+        try {
+            if (src == null) return false;
+            if (src.length() < 6 || src.length() > 400) return false;
+            if (src.indexOf('%') >= 0 || src.indexOf("://") >= 0) return false;
+            // 单个 token（无空白且是标识符形状）= 品牌名/键名/Action，绝不翻
+            if (src.indexOf(' ') < 0 && src.indexOf('\n') < 0
+                    && src.matches("^[A-Za-z][A-Za-z0-9._-]*$")) return false;
+            // 按资源名再挡一遍协议相关的键
+            try {
+                Object a0 = (param.args != null && param.args.length > 0) ? param.args[0] : null;
+                if (a0 instanceof Integer && res instanceof android.content.res.Resources) {
+                    String name = ((android.content.res.Resources) res).getResourceName((Integer) a0);
+                    if (name != null) {
+                        String n = name.toLowerCase();
+                        if (n.contains("app_name") || n.contains("application_name") || n.contains("user_agent")
+                                || n.contains("package_name") || n.contains("action") || n.contains("scheme")
+                                || n.contains("authority") || n.endsWith("_url") || n.contains("_host")
+                                || n.contains("_domain") || n.endsWith("_key") || n.contains("_token")
+                                || n.contains("api") || n.contains("mime")) {
+                            return false;
+                        }
+                    }
+                }
+            } catch (Throwable ignore) { }
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     private static void installResourceHooks() {
         try {
             Class<?> rc = Class.forName("android.content.res.Resources");
@@ -582,8 +619,7 @@ public class Main implements IXposedHookLoadPackage {
                         Object r = param.getResult();
                         if (!(r instanceof String)) return;
                         String src = (String) r;
-                        if (src.length() < 2 || src.length() > 400) return;
-                        if (src.indexOf('%') >= 0) return;   // 格式串不动
+                        if (!resSafe(param.thisObject, param, src)) return;
                         String tr = translate(src, "res");
                         if (tr != null && !tr.equals(src)) param.setResult(tr);
                     } catch (Throwable ignore) { }
