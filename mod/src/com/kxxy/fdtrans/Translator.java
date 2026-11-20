@@ -201,32 +201,74 @@ public final class Translator {
             if (SPOOLED.add(src)) spoolRequest(src);
             return;
         }
-        pool().execute(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    String out = translate(src);
-                    if (out != null && out.length() > 0 && !out.equalsIgnoreCase(src)) {
-                        CACHE.put(src, out);
-                        appendDisk(src, out);
+        // 界面上一屏会一口气冒几十条新串；逐条发请求要几十秒，
+        // 所以先攒 250ms 再一次多引擎批量发出去，一屏通常 1~3 秒全部到位。
+        synchronized (WAIT_LOCK) {
+            WAIT.add(src);
+            if (!drainScheduled) {
+                drainScheduled = true;
+                pool().execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        try { Thread.sleep(250L); } catch (Throwable ignore) { }
+                        drain();
+                    }
+                });
+            }
+        }
+    }
+
+    private static final java.util.ArrayDeque<String> WAIT = new java.util.ArrayDeque<String>();
+    private static final Object WAIT_LOCK = new Object();
+    private static volatile boolean drainScheduled;
+
+    private static void drain() {
+        while (true) {
+            List<String> batch = new ArrayList<String>();
+            synchronized (WAIT_LOCK) {
+                int chars = 0;
+                while (!WAIT.isEmpty() && batch.size() < 24 && chars < 3500) {
+                    String x = WAIT.poll();
+                    if (x == null) break;
+                    batch.add(x);
+                    chars += x.length();
+                }
+                if (batch.isEmpty()) {
+                    drainScheduled = false;
+                    return;
+                }
+            }
+            try {
+                String[] got = batch.size() == 1 ? null : translateBatch(batch);
+                if (got == null) {
+                    got = new String[batch.size()];
+                    for (int i = 0; i < batch.size(); i++) got[i] = translate(batch.get(i));
+                }
+                for (int i = 0; i < batch.size(); i++) {
+                    String s = batch.get(i);
+                    String d = (got != null && i < got.length) ? got[i] : null;
+                    if (d != null && d.length() > 0 && !d.equalsIgnoreCase(s)) {
+                        CACHE.put(s, d);
+                        appendDisk(s, d);
                         DONE.incrementAndGet();
                         lastActiveAt = System.currentTimeMillis();
                         report(false);
                         Listener l = listener;
                         if (l != null) {
-                            try { l.onTranslated(src, out); } catch (Throwable ignore) { }
+                            try { l.onTranslated(s, d); } catch (Throwable ignore) { }
                         }
                     } else {
-                        FAILED.add(src);
+                        FAILED.add(s);
                     }
-                } catch (Throwable t) {
-                    FAILED.add(src);
-                    Log.w(TAG, "translate fail: " + short_(src) + " / " + t);
-                } finally {
-                    PENDING.remove(src);
+                    PENDING.remove(s);
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "drain fail: " + t);
+                synchronized (WAIT_LOCK) {
+                    for (String s : batch) { PENDING.remove(s); FAILED.add(s); }
                 }
             }
-        });
+        }
     }
 
     /** 把一条待翻文本追加到本进程的请求文件，等模块 app 代翻。 */

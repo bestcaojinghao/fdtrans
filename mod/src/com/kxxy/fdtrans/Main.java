@@ -79,9 +79,9 @@ public class Main implements IXposedHookLoadPackage {
     private static volatile int lastSeen = -1;
     /** 每个界面类的刷新预算：{次数, 上次时间}。防止"译文不断到达 → 无限重建"导致页面来回乱动。 */
     private static final java.util.Map<String, long[]> REFRESH = new java.util.HashMap<String, long[]>();
-    private static final int MAX_REFRESH_PER_PAGE = 4;
-    private static final long PAGE_MIN_GAP_MS = 4000L;
-    private static final long PAGE_RESET_MS = 90000L;
+    private static final int MAX_REFRESH_PER_PAGE = 12;
+    private static final long PAGE_MIN_GAP_MS = 2500L;
+    private static final long PAGE_RESET_MS = 45000L;
     /** debounce 状态：首次待刷新时间 + 译文序号 */
     private static volatile long firstPendingAt;
     private static volatile int pendingSeq;
