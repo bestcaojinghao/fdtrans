@@ -32,6 +32,7 @@ public final class Preload {
     /** 排队预翻的包（「全部应用一起预翻」用），跑完一个接一个。 */
     private static final java.util.ArrayDeque<String> QUEUE = new java.util.ArrayDeque<String>();
     private static volatile int queueTotal;
+    private static volatile long startedAt;      // 本轮开始时间，用于算条/秒
 
     private Preload() {}
 
@@ -91,7 +92,17 @@ public final class Preload {
         i.putExtra("done", done);
         i.putExtra("total", total);
         i.putExtra("phase", phase);
+        i.putExtra("rate", rate());
         try { ctx.sendBroadcast(i); } catch (Throwable ignore) { }
+    }
+
+    /** 本次预翻的平均速度（条/秒），给界面显示。 */
+    public static int rate() {
+        long t0 = startedAt;
+        if (t0 <= 0 || done <= 0) return 0;
+        long ms = System.currentTimeMillis() - t0;
+        if (ms < 500) return 0;
+        return (int) Math.round(done * 1000.0 / ms);
     }
 
     private static void cast(Context ctx, String pkg) {
@@ -160,6 +171,7 @@ public final class Preload {
     }
 
     private static void work(Context ctx, String pkg) throws Exception {
+        startedAt = System.currentTimeMillis();
         List<String> cand = ApkText.extract(ctx, pkg, uiOnlyPref(ctx));
         android.util.Log.i("FDTrans", "preload " + pkg + " candidates=" + cand.size());
         if (cand.isEmpty()) {
@@ -190,7 +202,7 @@ public final class Preload {
             batch.add(s);
             chars += s.length() + 6;
             inBatch++;
-            if (chars >= 6000 || inBatch >= (Config.llm() ? 120 : 240)) {
+            if (chars >= (Config.llm() ? 5000 : 9000) || inBatch >= (Config.llm() ? 120 : 400)) {
                 String[] got = Translator.translateBatch(batch);
                 if (got == null && batch.size() > 1) got = Translator.translateBatch(batch); // 一次重试
                 if (got != null) {

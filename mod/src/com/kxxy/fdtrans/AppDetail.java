@@ -315,13 +315,15 @@ public class AppDetail extends Activity {
                 int d = i.getIntExtra("done", 0);
                 int t = i.getIntExtra("total", 0);
                 String ph = i.getStringExtra("phase");
+                int rate = i.getIntExtra("rate", 0);
                 if (t > 0) {
                     preBar.setVisibility(View.VISIBLE);
                     preBar.setMax(t);
                     preBar.setProgress(Math.min(d, t));
                 }
                 String s = (ph == null ? "" : ph);
-                if (t > 0) s += "   " + d + " / " + t + (t > 0 ? "（" + (d * 100 / t) + "%）" : "");
+                if (t > 0) s += "   " + d + " / " + t + "（" + (d * 100 / t) + "%）";
+                if (running && rate > 0) s += "   " + rate + " 条/秒";
                 preText.setText(s);
                 if (!running) {
                     if (t > 0) {
