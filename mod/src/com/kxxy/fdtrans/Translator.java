@@ -104,7 +104,7 @@ public final class Translator {
         } catch (Throwable ignore) { }
     }
 
-    private static File reqFile, resFile;
+    private static File reqFile, resFile, skipFile;
     /** 本进程有没有网络权限（缺 INTERNET 的应用会抛 SecurityException） */
     private static volatile boolean noInet;
     /** 已经写进请求文件、还没拿到译文的文本（避免每次重组都重复追加） */
@@ -121,11 +121,13 @@ public final class Translator {
         cacheFile = new File(dir, "fdtrans-cache.tsv");
         reqFile = new File(dir, "fdtrans-req.tsv");
         resFile = new File(dir, "fdtrans-res.tsv");
+        skipFile = new File(dir, "fdtrans-skip.tsv");
         try {
             java.net.CookieHandler.setDefault(new java.net.CookieManager());
         } catch (Throwable ignore) { }
         applyClearIfNeeded(dir);
         loadDisk();
+        loadSkip();
     }
 
     /** 运行期收到"清空缓存"命令：立即清内存并删盘。 */
@@ -193,7 +195,7 @@ public final class Translator {
 
     /** 提交翻译；已有缓存/已排队/已失败则直接返回。 */
     public static void submit(final String src) {
-        if (src == null || CACHE.containsKey(src) || FAILED.contains(src)) return;
+        if (src == null || CACHE.containsKey(src) || FAILED.contains(src) || DEAD.contains(src)) return;
         if (!PENDING.add(src)) return;
         SEEN.incrementAndGet();
         if (!canNet()) {
@@ -247,6 +249,10 @@ public final class Translator {
                 for (int i = 0; i < batch.size(); i++) {
                     String s = batch.get(i);
                     String d = (got != null && i < got.length) ? got[i] : null;
+                    if (d != null && d.length() > 0 && d.equalsIgnoreCase(s)) {
+                        // 引擎原样返回：用户名/用户名句/纯品牌名，翻不动，记盘上别再烧配额
+                        markDead(s);
+                    }
                     if (d != null && d.length() > 0 && !d.equalsIgnoreCase(s)) {
                         CACHE.put(s, d);
                         appendDisk(s, d);
@@ -889,5 +895,42 @@ public final class Translator {
 
     private static void close(java.io.Closeable c) {
         if (c != null) try { c.close(); } catch (Throwable ignore) { }
+    }
+
+    /** 引擎确认翻不动（返回原文）的串，落盘持久化，避免每次启动都重新烧配额。 */
+    private static final Set<String> DEAD = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+
+    static void markDead(String src) {
+        if (src == null || src.length() == 0) return;
+        FAILED.add(src);
+        if (!DEAD.add(src)) return;
+        try {
+            if (skipFile != null) {
+                java.io.FileWriter w = new java.io.FileWriter(skipFile, true);
+                w.write(esc(src) + "\n");
+                w.close();
+            }
+        } catch (Throwable ignore) { }
+    }
+
+    static boolean dead(String src) {
+        return src != null && DEAD.contains(src);
+    }
+
+    private static void loadSkip() {
+        try {
+            if (skipFile == null || !skipFile.exists()) return;
+            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(skipFile));
+            String line;
+            while ((line = r.readLine()) != null) {
+                if (line.length() == 0) continue;
+                String s = unesc(line);
+                if (s != null && s.length() > 0) { DEAD.add(s); FAILED.add(s); }
+            }
+            r.close();
+            Log.i(TAG, "skip list loaded: " + DEAD.size());
+        } catch (Throwable t) {
+            Log.w(TAG, "loadSkip err " + t);
+        }
     }
 }

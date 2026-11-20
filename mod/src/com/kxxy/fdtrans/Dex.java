@@ -192,14 +192,19 @@ public final class Dex {
     private static final String STR = "Ljava/lang/String;";
     private static final String LIST = "Ljava/util/List;";
 
-    /** 同时有 (String)V 与 (String,List)V 或 (String,List,List)V 的类 */
+    /**
+     * 找 AnnotatedString 的类（可能被 R8 改名）。
+     * 混淆版常见只剩 (String,List,List)V、或 (String,List)V + (List,String)V，
+     * 所以不能强求 (String)V —— 之前强制要求它，导致 yuki 这类混淆应用只捞到一个假候选。
+     */
     private static void match(Map<String, Set<String>> ctor, Set<String> out) {
         for (Map.Entry<String, Set<String>> e : ctor.entrySet()) {
             Set<String> s = e.getValue();
-            boolean one = s.contains("(" + STR + ")V");
-            boolean two = s.contains("(" + STR + LIST + ")V");
             boolean three = s.contains("(" + STR + LIST + LIST + ")V");
-            if (!one || (!two && !three)) continue;
+            boolean two = s.contains("(" + STR + LIST + ")V");
+            boolean rev = s.contains("(" + LIST + STR + ")V");
+            boolean ok = three || (two && rev);
+            if (!ok) continue;
             String desc = e.getKey();
             if (desc == null || !desc.startsWith("L") || !desc.endsWith(";")) continue;
             out.add(desc.substring(1, desc.length() - 1).replace('/', '.'));

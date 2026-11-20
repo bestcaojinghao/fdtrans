@@ -735,13 +735,16 @@ public class Main implements IXposedHookLoadPackage {
         if (tr == null) {
             if (!shouldTranslate(src)) {
                 skip("rule", src);
+                audit("SKIP:" + ruleOf(src), src);
                 return null;
             }
             tr = Translator.get(src);
             if (tr == null) {
                 Translator.submit(src);
+                audit("MISS", src);
                 return null;
             }
+            audit("HIT", src);
         }
         if (tr.equals(src)) return null;
         if (fromDict && Translator.get(src) == null) Translator.put(src, tr);  // 只记一次，避免反复 +DONE 引发刷新循环
@@ -750,6 +753,34 @@ public class Main implements IXposedHookLoadPackage {
             tr = src + "（" + tr + "）";
         }
         return tr;
+    }
+
+    /** 审计模式：把「界面上出现过、但没翻」的每一条都打出来，用来定位到底卡在哪一步。 */
+    private static void audit(String why, String s) {
+        if (!Config.debug()) return;
+        Log("AUD " + why + " len=" + s.length() + " [" + clip(s) + "]");
+    }
+
+    /** 归类被规则挡掉的原因，输出给审计日志。 */
+    private static String ruleOf(String s) {
+        int n = s.length();
+        if (n < 2) return "too-short";
+        if (n > 2000) return "too-long";
+        boolean latin = false;
+        for (int i = 0; i < n; i++) {
+            char c = s.charAt(i);
+            if ((c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3040 && c <= 0x30FF)
+                    || (c >= 0xAC00 && c <= 0xD7AF)) return "has-cjk";
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) latin = true;
+        }
+        if (!latin) return "no-latin";
+        if (SIZE.matcher(s).matches()) return "size";
+        if (NUM_UNIT.matcher(s).matches()) return "num-unit";
+        if (ASCII_ONLY.matcher(s).matches()) {
+            if (HAS_SEP.matcher(s).matches()) return "id-like";
+            if (VERSION.matcher(s).matches()) return "version";
+        }
+        return "other";
     }
 
     /** 诊断：确认 hook 到底落在哪个类、UI 走的是哪条文本通路。只在前 N 次打日志。 */
