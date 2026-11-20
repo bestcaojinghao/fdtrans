@@ -559,6 +559,7 @@ public class Main implements IXposedHookLoadPackage {
         installParagraphHooks(cl);
         installPlainTextCacheHooks(cl);
         installResourceHooks();
+        installLayoutHooks();
         if (Config.debug()) installDiagHooks(cl);
         int structOk = 0;
         if (hooked == 0) structOk = installStructuralHooks(app, cl);
@@ -580,10 +581,24 @@ public class Main implements IXposedHookLoadPackage {
     private static boolean resSafe(Object res, XC_MethodHook.MethodHookParam param, String src) {
         try {
             if (src == null) return false;
-            if (src.length() < 6 || src.length() > 400) return false;
+            if (src.length() < 2 || src.length() > 400) return false;
             if (src.indexOf('%') >= 0 || src.indexOf("://") >= 0) return false;
-            // 单个 token（无空白且是标识符形状）= 品牌名/键名/Action，绝不翻
-            if (src.indexOf(' ') < 0 && src.indexOf('\n') < 0
+            // 资源属于「别的包」时（商店列表里读别的应用图标/名字），是纯展示用途，
+            // 短词与应用名都允许翻 —— 1.19.2 一刀切挡短词，把商店列表的应用名全退回英文了。
+            boolean foreign = false;
+            String resPkg = null;
+            try {
+                Object a0 = (param.args != null && param.args.length > 0) ? param.args[0] : null;
+                if (a0 instanceof Integer && res instanceof android.content.res.Resources) {
+                    resPkg = ((android.content.res.Resources) res).getResourcePackageName((Integer) a0);
+                    Object selfObj = Class.forName("android.app.ActivityThread")
+                            .getMethod("currentPackageName").invoke(null);
+                    String self = selfObj instanceof String ? (String) selfObj : null;
+                    foreign = resPkg != null && self != null && !resPkg.equals(self);
+                }
+            } catch (Throwable ignore) { }
+            // 单个 token（无空白且是标识符形状）= 品牌名/键名/Action：本包内不翻（会被拼进协议头），别的包的展示名可以翻
+            if (!foreign && src.indexOf(' ') < 0 && src.indexOf('\n') < 0
                     && src.matches("^[A-Za-z][A-Za-z0-9._-]*$")) return false;
             // 按资源名再挡一遍协议相关的键
             try {
@@ -592,11 +607,12 @@ public class Main implements IXposedHookLoadPackage {
                     String name = ((android.content.res.Resources) res).getResourceName((Integer) a0);
                     if (name != null) {
                         String n = name.toLowerCase();
-                        if (n.contains("app_name") || n.contains("application_name") || n.contains("user_agent")
+                        boolean risk = !foreign;
+                        if (risk && (n.contains("app_name") || n.contains("application_name") || n.contains("user_agent")
                                 || n.contains("package_name") || n.contains("action") || n.contains("scheme")
                                 || n.contains("authority") || n.endsWith("_url") || n.contains("_host")
                                 || n.contains("_domain") || n.endsWith("_key") || n.contains("_token")
-                                || n.contains("api") || n.contains("mime")) {
+                                || n.contains("api") || n.contains("mime"))) {
                             return false;
                         }
                     }
@@ -605,6 +621,60 @@ public class Main implements IXposedHookLoadPackage {
             return true;
         } catch (Throwable t) {
             return false;
+        }
+    }
+
+    /**
+     * 布局通路：Compose 的段落最终都交给 android.text.StaticLayout 排版。
+     * StaticLayout / StaticLayout$Builder 是框架类，永远不被 R8 改名，
+     * 所以这条通路能覆盖「Compose 类被混淆到猜不出名字」的应用（canta 就是这样：
+     * compose hooks installed: 0/2、struct=0，界面一条都翻不了）。
+     * 在 obtain() 换掉 CharSequence 再排版，度量和换行按译文算，不会错位。
+     */
+    private static volatile int LAY_SEEN = 0;
+
+    private static void installLayoutHooks() {
+        try {
+            Class<?> b = Class.forName("android.text.StaticLayout$Builder");
+            XC_MethodHook h = new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    try {
+                        if (param.args == null || param.args.length < 3) return;
+                        if (!(param.args[0] instanceof CharSequence)) return;
+                        CharSequence cs = (CharSequence) param.args[0];
+                        // 注意：Compose 传进来的就是 SpannableString（Spanned），不能因为带 span 就跳过；
+                        // 我们把 args[0] 换成一个普通 String，span 自然丢弃，不会出现 range 越界的崩溃。
+                        String src = cs.toString();
+                        if (src.length() < 2 || src.length() > 2000) return;
+                        if (LAY_SEEN < 40) {
+                            LAY_SEEN++;
+                            Log("LAY[" + LAY_SEEN + "] " + src.substring(0, Math.min(48, src.length())));
+                        }
+                        String tr = translate(src, "layout");
+                        if (tr == null || tr.equals(src)) {
+                            // 未命中：已经排队去翻了，但 Compose 不会因为缓存变了就重排，
+                            // 所以这里也要触发一次（内部有 2.5s/每页 12 次/空闲回补 的节流）。
+                            maybeRefresh();
+                            return;
+                        }
+                        // 必须保住类型：Compose 后面会把它 cast 回 Spannable/Spanned，
+                        // 直接塞普通 String 会让进程静默退出（canta 实测 am start 后 pidof 空）。
+                        if (cs instanceof android.text.Spanned) {
+                            param.args[0] = new android.text.SpannableString(tr);
+                        } else {
+                            param.args[0] = tr;
+                        }
+                        param.args[1] = 0;
+                        param.args[2] = tr.length();
+                        Log("LAYREPL: [" + clip(src) + "] -> [" + clip(tr) + "]");
+                    } catch (Throwable t) { }
+                }
+            };
+            XposedBridge.hookAllMethods(b, "obtain", h);
+            XposedBridge.hookAllConstructors(Class.forName("android.text.StaticLayout"), h);
+            Log("layout hooks ok: StaticLayout.Builder.obtain + StaticLayout ctor");
+        } catch (Throwable t) {
+            Log("layout hooks fail: " + t);
         }
     }
 
