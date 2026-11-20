@@ -82,6 +82,8 @@ public class Main implements IXposedHookLoadPackage {
     private static final int MAX_REFRESH_PER_PAGE = 12;
     private static final long PAGE_MIN_GAP_MS = 2500L;
     private static final long PAGE_RESET_MS = 45000L;
+    /** 页面静置多久后允许补一次重建额度（毫秒）。 */
+    private static final long IDLE_REFILL_MS = 6000L;
     /** debounce 状态：首次待刷新时间 + 译文序号 */
     private static volatile long firstPendingAt;
     private static volatile int pendingSeq;
@@ -283,6 +285,12 @@ public class Main implements IXposedHookLoadPackage {
             REFRESH.put(key, st);
         }
         if (now - st[1] > PAGE_RESET_MS) st[0] = 0L;
+        // 页面静置一段时间后补一次额度：详情页刚打开时译文往往晚 1~3 秒才到，
+        // 额度用完后如果再没有一次重建，用户就一直看到英文（这正是"介绍还是英文"的成因）。
+        if (st[0] >= MAX_REFRESH_PER_PAGE && (now - st[1]) > IDLE_REFILL_MS) {
+            st[0] = MAX_REFRESH_PER_PAGE - 1;
+            Log("refresh budget refilled after idle " + ((now - st[1]) / 1000L) + "s");
+        }
         if (st[0] >= MAX_REFRESH_PER_PAGE) {
             Log("skip refresh: budget used up for " + key + " (" + st[0] + ")");
             synchronized (Main.class) { firstPendingAt = 0L; }
@@ -550,10 +558,43 @@ public class Main implements IXposedHookLoadPackage {
         Log("compose hooks installed: " + hooked + " / " + names.size());
         installParagraphHooks(cl);
         installPlainTextCacheHooks(cl);
+        installResourceHooks();
         if (Config.debug()) installDiagHooks(cl);
         int structOk = 0;
         if (hooked == 0) structOk = installStructuralHooks(app, cl);
         probeAndReport(app, hooked, structOk);
+    }
+
+    /**
+     * 通用兜底通路：hook android.content.res.Resources#getString(int) / getText(int)。
+     * 系统类名不会被 R8 改，所以混淆应用（yuki 这类 Compose 全改名）也能吃到这条通路：
+     * 界面上任何来自 resources.arsc 的文案都会在这里经过一次翻译。
+     * 带 % 的格式串一律放过，避免参数格式化崩溃。
+     */
+    private static void installResourceHooks() {
+        try {
+            Class<?> rc = Class.forName("android.content.res.Resources");
+            XC_MethodHook h = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (!Config.enabled()) return;
+                    try {
+                        Object r = param.getResult();
+                        if (!(r instanceof String)) return;
+                        String src = (String) r;
+                        if (src.length() < 2 || src.length() > 400) return;
+                        if (src.indexOf('%') >= 0) return;   // 格式串不动
+                        String tr = translate(src, "res");
+                        if (tr != null && !tr.equals(src)) param.setResult(tr);
+                    } catch (Throwable ignore) { }
+                }
+            };
+            XposedBridge.hookAllMethods(rc, "getString", h);
+            XposedBridge.hookAllMethods(rc, "getText", h);
+            Log("resource hooks ok: Resources.getString/getText");
+        } catch (Throwable t) {
+            Log("resource hook skip " + t);
+        }
     }
 
     /** 能力探测：把「这个应用能不能翻」的结果广播给模块主界面。 */

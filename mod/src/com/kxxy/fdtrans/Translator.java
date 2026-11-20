@@ -206,7 +206,7 @@ public final class Translator {
         // 界面上一屏会一口气冒几十条新串；逐条发请求要几十秒，
         // 所以先攒 250ms 再一次多引擎批量发出去，一屏通常 1~3 秒全部到位。
         synchronized (WAIT_LOCK) {
-            WAIT.add(src);
+            if (src.length() >= 120) WAIT.addFirst(src); else WAIT.add(src);
             if (!drainScheduled) {
                 drainScheduled = true;
                 pool().execute(new Runnable() {
