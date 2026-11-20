@@ -149,6 +149,21 @@ public class Bridge extends Service {
     private static void checkPreloadTrigger() {
         try {
             if (loopCtx == null) return;
+            // 把「大模型」配置推给所有作用域进程（钩子进程读的是目标应用自己的 fdtrans-hook）
+            java.io.File pl = new java.io.File(loopCtx.getFilesDir(), "push-llm-now.txt");
+            if (pl.exists()) {
+                pl.delete();
+                java.util.Set<String> sc0 = Scope.read(loopCtx);
+                if (sc0 != null && !sc0.isEmpty()) {
+                    android.content.SharedPreferences sp0 = loopCtx.getSharedPreferences("fdtrans", 0);
+                    Push.bool(loopCtx, sc0, "useLlm", sp0.getBoolean("useLlm", false));
+                    Push.str(loopCtx, sc0, "llmBase", sp0.getString("llmBase", ""));
+                    Push.str(loopCtx, sc0, "llmKey", sp0.getString("llmKey", ""));
+                    Push.str(loopCtx, sc0, "llmModel", sp0.getString("llmModel", "deepseek-flash"));
+                    Log.i(TAG, "external push-llm -> " + sc0.size() + " apps");
+                }
+            }
+
             // 一键体检：跑完把报告写到 files 目录，便于外部读取/排障
             java.io.File chk = new java.io.File(loopCtx.getFilesDir(), "checkup-now.txt");
             if (chk.exists()) {

@@ -27,6 +27,7 @@ import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.Switch;
+import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -259,6 +260,68 @@ public class Settings extends Activity {
         card3.addView(text("并行时会把一批文字拆给几家引擎同时翻，谁先回来用谁的；"
                 + "某家挂了自动换下一家。换引擎后要重开目标应用才生效。",
                 12, 0xFF7E7E7E), lp(8));
+        // ---- 大模型 ----
+        Switch swLlm = new Switch(this);
+        swLlm.setText("用大模型翻译（更准，更慢）");
+        swLlm.setTextSize(15);
+        swLlm.setTextColor(0xFFEEEEEE);
+        swLlm.setChecked(sp.getBoolean("useLlm", false));
+        swLlm.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(android.widget.CompoundButton btn, boolean v) {
+                sp.edit().putBoolean("useLlm", v).apply();
+                Config.setLlm(v);
+                Push.bool(Settings.this, scoped, "useLlm", v);
+                toast(v ? "大模型已开：小批量与失败的句子交给大模型" : "大模型已关");
+            }
+        });
+        card3.addView(swLlm, lp(12));
+
+        EditText etBase = new EditText(this);
+        etBase.setTextSize(13);
+        etBase.setTextColor(0xFFDDDDDD);
+        etBase.setHint("接口地址，如 https://api.4600655.xyz/v1");
+        etBase.setText(sp.getString("llmBase", "https://api.4600655.xyz/v1"));
+        card3.addView(etBase, lp(8));
+
+        EditText etKey = new EditText(this);
+        etKey.setTextSize(13);
+        etKey.setTextColor(0xFFDDDDDD);
+        etKey.setHint("API Key");
+        etKey.setText(sp.getString("llmKey", ""));
+        card3.addView(etKey, lp(6));
+
+        EditText etModel = new EditText(this);
+        etModel.setTextSize(13);
+        etModel.setTextColor(0xFFDDDDDD);
+        etModel.setHint("模型名，如 deepseek-flash");
+        etModel.setText(sp.getString("llmModel", "deepseek-flash"));
+        card3.addView(etModel, lp(6));
+
+        Button saveLlm = btn("保存大模型设置", 0xFF264238);
+        saveLlm.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String b = etBase.getText().toString().trim();
+                String k = etKey.getText().toString().trim();
+                String m = etModel.getText().toString().trim();
+                if (m.length() == 0) m = "deepseek-flash";
+                sp.edit().putString("llmBase", b).putString("llmKey", k)
+                        .putString("llmModel", m).apply();
+                Config.setLlmBase(b);
+                Config.setLlmKey(k);
+                Config.setLlmModel(m);
+                Push.str(Settings.this, scoped, "llmBase", b);
+                Push.str(Settings.this, scoped, "llmKey", k);
+                Push.str(Settings.this, scoped, "llmModel", m);
+                toast("已保存（钩子进程下次启动生效）");
+            }
+        });
+        card3.addView(saveLlm, lp(8));
+        card3.addView(text("大模型实测约 6~7 条/秒（腾讯 30~60 条/秒）。它只在「质量模式」下补小批量、"
+                + "以及其它引擎翻失败的句子，平时不抢快路。",
+                12, 0xFF7E7E7E), lp(8));
+
         root.addView(card3, lp(18));
 
         // ---- 维护 ----
@@ -275,6 +338,24 @@ public class Settings extends Activity {
                 }, "fdtrans-lspd").start();
             }
         });
+        Button killApps = btn("重启所有已加入的应用（让新译文/新设置立刻生效）", 0xFF2A3A2A);
+        killApps.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                final Set<String> pk = fetchScoped();
+                toast("正在重启 " + pk.size() + " 个应用");
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        // 进程不冷启动就吃不到新的 hook/译文缓存，这是「明明有进度界面还是英文」的主因
+                        for (String p : pk) Scope.suMM("am force-stop " + p + " 2>/dev/null");
+                    }
+                }, "fdtrans-killall").start();
+            }
+        });
+        card4.addView(killApps, lp(8));
+        card4.addView(text("某个应用改了设置/刚翻完却还是英文 → 点这个。进程不重启就还是老的 hook 状态。",
+                12, 0xFF7E7E7E), lp(6));
         card4.addView(restart, lp(12));
         Button bridge = btn(Bridge.running ? "关闭后台代翻服务" : "开启后台代翻服务（没联网权限的应用）", 0xFF2E4A44);
         bridge.setOnClickListener(new View.OnClickListener() {
@@ -797,6 +878,11 @@ public class Settings extends Activity {
 
 
     /** 列表按行数撑满，交给外层 ScrollView 统一滚动——否则内嵌 ListView 只露前几行且滑不动。 */
+    private java.util.Set<String> fetchScoped() {
+        java.util.Set<String> r = Scope.read(this);
+        return r == null ? new java.util.LinkedHashSet<String>() : r;
+    }
+
     private int listHeight() {
         int n = Math.max(1, rows.size());
         return dp(56) * n + dp(4);

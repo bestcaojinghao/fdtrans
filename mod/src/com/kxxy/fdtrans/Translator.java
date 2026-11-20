@@ -564,6 +564,8 @@ public final class Translator {
                         if (!usable(e)) continue;
                         // youdao/mymemory 只能逐条：一组 40 条＝40 个串行请求，会拖死整批
                         if (!batchCapable(e) && sub.size() > 6) continue;
+                        // 大模型只在「质量模式」开启、且组不大时用（实测 6~7 条/秒，不适合大组）
+                        if ("llm".equals(e.name()) && (!Config.llm() || sub.size() > 20)) continue;
                         // Bing 用 ||| 拼批，条数一多分隔符会被翻掉（实测 120 条返回 123 段），>60 条交给腾讯
                         if ("bing".equals(e.name()) && sub.size() > 60) continue;
                         try {
@@ -599,6 +601,29 @@ public final class Translator {
                 if (out[i] == null || out[i].length() == 0) out[i] = bing[i];
             }
         }
+        // 兜底 1.5：还没填上的交给大模型（质量最好，一次 ≤12 条）
+        if (Config.llm()) {
+            List<String> rest = new ArrayList<String>();
+            List<Integer> idx = new ArrayList<Integer>();
+            for (int i = 0; i < out.length; i++) {
+                if (out[i] == null || out[i].length() == 0) { rest.add(items.get(i)); idx.add(i); }
+            }
+            for (int from = 0; from < rest.size() && from < 12; from += 12) {
+                int to = Math.min(rest.size(), from + 12);
+                try {
+                    String[] got = Engines.LLM.translate(new ArrayList<String>(rest.subList(from, to)));
+                    noteEngine("llm", got != null && got.length == to - from);
+                    if (got != null && got.length == to - from) {
+                        for (int k = 0; k < got.length; k++) {
+                            if (got[k] != null && got[k].length() > 0) out[idx.get(from + k)] = got[k];
+                        }
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "engine llm err " + t);
+                }
+            }
+        }
+
         // 兜底 2：还没填上的逐条 mymemory
         for (int i = 0; i < out.length; i++) {
             if (out[i] == null || out[i].length() == 0) out[i] = callMyMemory(items.get(i));

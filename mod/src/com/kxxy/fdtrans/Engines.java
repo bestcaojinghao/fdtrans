@@ -149,7 +149,122 @@ public final class Engines {
     };
 
     /** 按质量排序；并行分组时按组号轮转起点，避免所有组都挤在 bing 上。 */
-    public static final E[] ALL = {BING, TENCENT, YOUDAO, MYMEMORY};
+
+    /**
+     * 大模型（OpenAI 兼容 /chat/completions）。质量最好：保留占位符、能读懂整句上下文，
+     * 但一次只能生成几十条，实测吞吐约 6~7 条/秒（腾讯 30~60 条/秒），所以只当「质量模式」用。
+     */
+    public static final E LLM = new E() {
+        public String name() { return "llm"; }
+
+        public String[] translate(List<String> items) throws Exception {
+            String base = Config.llmBase();
+            String key = Config.llmKey();
+            if (base == null || base.length() == 0 || key == null || key.length() == 0) return null;
+            StringBuilder arr = new StringBuilder();
+            for (int i = 0; i < items.size(); i++) {
+                if (i > 0) arr.append(',');
+                arr.append('"').append(jsonEsc(items.get(i))).append('"');
+            }
+            String sys = "You are a translator for Android app UI. Translate every English string into "
+                    + "concise Simplified Chinese. Keep %s / %1$d placeholders, \\n escapes, URLs and "
+                    + "product names unchanged. Return ONLY a JSON array of strings with the same order "
+                    + "and the same length as the input, no commentary.";
+            String body = "{\"model\":\"" + jsonEsc(Config.llmModel()) + "\",\"temperature\":0,"
+                    + "\"reasoning_effort\":\"none\",\"messages\":[{\"role\":\"system\",\"content\":\""
+                    + jsonEsc(sys) + "\"},{\"role\":\"user\",\"content\":\"" + jsonEsc("[" + arr + "]")
+                    + "\"}]}";
+            String url = base.endsWith("/") ? base + "chat/completions" : base + "/chat/completions";
+            HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+            try {
+                c.setRequestMethod("POST");
+                c.setConnectTimeout(15000);
+                c.setReadTimeout(120000);
+                c.setDoOutput(true);
+                c.setRequestProperty("Content-Type", "application/json");
+                c.setRequestProperty("Authorization", "Bearer " + key);
+                OutputStream os = c.getOutputStream();
+                os.write(body.getBytes("UTF-8"));
+                os.close();
+                int code = c.getResponseCode();
+                if (code != 200) {
+                    android.util.Log.w("FDTrans", "llm http " + code);
+                    return null;
+                }
+                String json = read(c);
+                int i = json.indexOf("\"content\":\"");
+                if (i < 0) return null;
+                int from = i + 11;
+                StringBuilder raw = new StringBuilder();
+                for (int k = from; k < json.length(); k++) {
+                    char ch = json.charAt(k);
+                    if (ch == '\\') { raw.append(ch).append(json.charAt(++k)); continue; }
+                    if (ch == '"') break;
+                    raw.append(ch);
+                }
+                String[] parsed = parseJsonArray(unescape(raw.toString()));
+                if (parsed == null || parsed.length != items.size()) {
+                    android.util.Log.w("FDTrans", "llm len mismatch " + (parsed == null ? -1 : parsed.length)
+                            + "/" + items.size());
+                    return null;
+                }
+                return parsed;
+            } finally {
+                try { c.disconnect(); } catch (Throwable ignore) { }
+            }
+        }
+    };
+
+    /** 解析 JSON 字符串数组（模型偶尔会包 ``` 或加说明，先截取第一个 '[' 到最后一个 ']'）。 */
+    static String[] parseJsonArray(String s) {
+        if (s == null) return null;
+        int a = s.indexOf('['), b = s.lastIndexOf(']');
+        if (a < 0 || b <= a) return null;
+        s = s.substring(a + 1, b);
+        List<String> out = new ArrayList<String>();
+        StringBuilder cur = null;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (cur == null) {
+                if (c == '"') cur = new StringBuilder();
+                continue;
+            }
+            if (c == '\\' && i + 1 < s.length()) { cur.append(c).append(s.charAt(++i)); continue; }
+            if (c == '"') { out.add(unescape(cur.toString())); cur = null; continue; }
+            cur.append(c);
+        }
+        return out.toArray(new String[0]);
+    }
+
+    /** 只处理 JSON 里常见的 \\n \\t \\" \\\\ \\uXXXX。 */
+    static String unescape(String s) {
+        StringBuilder b = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c != '\\' || i + 1 >= s.length()) { b.append(c); continue; }
+            char n = s.charAt(++i);
+            switch (n) {
+                case 'n': b.append('\n'); break;
+                case 't': b.append('\t'); break;
+                case 'r': b.append('\r'); break;
+                case '"': b.append('"'); break;
+                case '/': b.append('/'); break;
+                case '\\': b.append('\\'); break;
+                case 'u':
+                    if (i + 4 < s.length()) {
+                        try {
+                            b.append((char) Integer.parseInt(s.substring(i + 1, i + 5), 16));
+                            i += 4;
+                        } catch (Throwable ignore) { b.append(n); }
+                    } else b.append(n);
+                    break;
+                default: b.append(n);
+            }
+        }
+        return b.toString();
+    }
+
+    public static final E[] ALL = {BING, TENCENT, YOUDAO, MYMEMORY, LLM};
 
     private Engines() {}
 

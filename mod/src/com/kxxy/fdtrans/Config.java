@@ -80,4 +80,18 @@ public final class Config {
     public static boolean useBing() {
         return !"mymemory".equals(engine);
     }
+
+    private static volatile boolean llm = false;
+    private static volatile String llmBase = "https://api.4600655.xyz/v1";
+    private static volatile String llmKey = "";
+    private static volatile String llmModel = "deepseek-flash";
+
+    public static boolean llm() { return llm; }
+    public static void setLlm(boolean v) { llm = v; }
+    public static String llmBase() { return llmBase; }
+    public static void setLlmBase(String v) { llmBase = v; }
+    public static String llmKey() { return llmKey; }
+    public static void setLlmKey(String v) { llmKey = v; }
+    public static String llmModel() { return llmModel; }
+    public static void setLlmModel(String v) { llmModel = v; }
 }

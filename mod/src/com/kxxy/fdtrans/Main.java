@@ -406,6 +406,10 @@ public class Main implements IXposedHookLoadPackage {
             Config.setSkipNames(sp.getBoolean("skipNames", true));
             Config.setDebug(sp.getBoolean("debug", false));
             Config.setParallel(sp.getBoolean("parallel", true));
+            Config.setLlm(sp.getBoolean("useLlm", false));
+            Config.setLlmBase(sp.getString("llmBase", "https://api.4600655.xyz/v1"));
+            Config.setLlmKey(sp.getString("llmKey", ""));
+            Config.setLlmModel(sp.getString("llmModel", "deepseek-flash"));
             String eng = sp.getString("engine", "bing");
             if ("mymemory".equals(eng) && !sp.getBoolean("engineMigrated", false)) {
                 eng = "bing";   // 老版本默认是 mymemory，迁移到 bing
@@ -441,6 +445,23 @@ public class Main implements IXposedHookLoadPackage {
                             boolean v = i.getBooleanExtra("debug", false);
                             Config.setDebug(v);
                             e.putBoolean("debug", v);
+                        }
+                        if (i.hasExtra("useLlm")) {
+                            boolean v = i.getBooleanExtra("useLlm", false);
+                            Config.setLlm(v);
+                            e.putBoolean("useLlm", v);
+                        }
+                        if (i.hasExtra("llmKey")) {
+                            String v = i.getStringExtra("llmKey");
+                            if (v != null) { Config.setLlmKey(v); e.putString("llmKey", v); }
+                        }
+                        if (i.hasExtra("llmBase")) {
+                            String v = i.getStringExtra("llmBase");
+                            if (v != null) { Config.setLlmBase(v); e.putString("llmBase", v); }
+                        }
+                        if (i.hasExtra("llmModel")) {
+                            String v = i.getStringExtra("llmModel");
+                            if (v != null) { Config.setLlmModel(v); e.putString("llmModel", v); }
                         }
                         if (i.hasExtra("parallel")) {
                             boolean v = i.getBooleanExtra("parallel", true);

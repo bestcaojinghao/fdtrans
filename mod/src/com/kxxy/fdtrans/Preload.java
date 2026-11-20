@@ -190,7 +190,7 @@ public final class Preload {
             batch.add(s);
             chars += s.length() + 6;
             inBatch++;
-            if (chars >= 6000 || inBatch >= 240) {
+            if (chars >= 6000 || inBatch >= (Config.llm() ? 120 : 240)) {
                 String[] got = Translator.translateBatch(batch);
                 if (got == null && batch.size() > 1) got = Translator.translateBatch(batch); // 一次重试
                 if (got != null) {
